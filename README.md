@@ -20,7 +20,7 @@ npm install @ronix1020/react-native-ultimate-thermal-printer
 Si deseas instalar la última versión directamente desde el repositorio:
 
 ```bash
-npm install git+https://github.com/TU_USUARIO/react-native-ultimate-thermal-printer.git
+npm install git+https://github.com/ronix1020/expo-thermal-printer.git
 ```
 
 ### ⚠️ Importante: Requisito de SDK Propietario
