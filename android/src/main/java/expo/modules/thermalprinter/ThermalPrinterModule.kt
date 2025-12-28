@@ -394,10 +394,11 @@ class ThermalPrinterModule : Module() {
                         "table" -> {
                             val header = item["tableHeader"] as? List<String> ?: emptyList()
                             val columnWidths = item["columnWidths"] as? List<Number> ?: emptyList()
+                            val columnAlignment = item["columnAlignment"] as? List<String> ?: emptyList()
                             val contentList = item["content"] as? List<List<String>> ?: emptyList()
                             
-                            if (header.isNotEmpty() && columnWidths.isNotEmpty()) {
-                                commands.add(getTableCmd(header, columnWidths, contentList, width, charset))
+                            if (columnWidths.isNotEmpty()) {
+                                commands.add(getTableCmd(header, columnWidths, columnAlignment, contentList, width, charset))
                             }
                         }
                         "divider" -> {
@@ -487,7 +488,7 @@ class ThermalPrinterModule : Module() {
 
 // Helper Functions
 
-fun getTableCmd(header: List<String>, columnWidths: List<Number>, content: List<List<String>>, printerWidth: Int, charset: java.nio.charset.Charset): ByteArray {
+fun getTableCmd(header: List<String>, columnWidths: List<Number>, columnAlignment: List<String>, content: List<List<String>>, printerWidth: Int, charset: java.nio.charset.Charset): ByteArray {
     val stream = ByteArrayOutputStream()
     
     // Calculate max chars per line
@@ -531,9 +532,23 @@ fun getTableCmd(header: List<String>, columnWidths: List<Number>, content: List<
                 val width = colChars[j]
                 val lines = if (j < cellLines.size) cellLines[j] else emptyList()
                 val text = if (i < lines.size) lines[i] else ""
+                val align = if (j < columnAlignment.size) columnAlignment[j] else "left"
                 
-                // Pad text with spaces
-                val paddedText = text.padEnd(width)
+                // Pad text with spaces based on alignment
+                val paddedText = when (align) {
+                    "right" -> text.padStart(width)
+                    "center" -> {
+                        val totalSpaces = width - text.length
+                        if (totalSpaces <= 0) text
+                        else {
+                            val leftSpaces = totalSpaces / 2
+                            val rightSpaces = totalSpaces - leftSpaces
+                            " ".repeat(leftSpaces) + text + " ".repeat(rightSpaces)
+                        }
+                    }
+                    else -> text.padEnd(width) // left
+                }
+                
                 // Truncate if somehow longer (shouldn't happen with splitText)
                 val finalText = if (paddedText.length > width) paddedText.substring(0, width) else paddedText
                 
@@ -549,7 +564,9 @@ fun getTableCmd(header: List<String>, columnWidths: List<Number>, content: List<
     }
 
     // Print Header
-    printRow(header)
+    if (header.isNotEmpty()) {
+        printRow(header)
+    }
     
     // Print Content
     for (row in content) {

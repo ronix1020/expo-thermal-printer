@@ -49,6 +49,7 @@ export interface TableItem extends BasePrinterItem {
   type: 'table';
   tableHeader?: string[];
   columnWidths: number[];
+  columnAlignment?: PrinterAlign[]; // Alignment for each column
   content: string[][];
 }
 
