@@ -13,7 +13,7 @@ export type Device = {
   macAddress: string;
 };
 
-export type PrinterEncoding = 'utf-8' | 'gbk' | 'ascii' | 'cp1258';
+export type PrinterEncoding = 'utf-8' | 'gbk' | 'ascii' | 'cp1258' | 'windows-1252' | 'iso-8859-1' | 'pc850';
 export type PrinterAlign = 'left' | 'center' | 'right';
 export type PrinterFont = 'primary' | 'secondary';
 

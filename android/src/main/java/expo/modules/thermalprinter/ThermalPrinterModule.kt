@@ -270,9 +270,18 @@ class ThermalPrinterModule : Module() {
                     "gbk" -> "GBK"
                     "ascii" -> "US-ASCII"
                     "cp1258" -> "windows-1258"
+                    "windows-1252" -> "windows-1252"
+                    "iso-8859-1" -> "ISO-8859-1"
+                    "pc850" -> "IBM850"
                     else -> "UTF-8"
                 }
                 val charset = java.nio.charset.Charset.forName(charsetName)
+
+                // Initialize Printer
+                commands.add(byteArrayOf(0x1B, 0x40)) 
+
+                // Set Code Page
+                commands.add(getCodePageCmd(encoding))
 
                 // Set Line Spacing
                 commands.add(getLineSpacingCmd(lineSpacing))
@@ -638,4 +647,21 @@ fun getFontCmd(font: String): ByteArray {
     // n = 0, 48: Font A (12x24) -> primary
     // n = 1, 49: Font B (9x17) -> secondary
     return if (font == "secondary") byteArrayOf(0x1B, 0x4D, 0x01) else byteArrayOf(0x1B, 0x4D, 0x00)
+}
+
+fun getCodePageCmd(encoding: String): ByteArray {
+    // ESC t n
+    // Common mappings:
+    // 0: PC437 (USA)
+    // 2: PC850 (Multilingual)
+    // 16: WPC1252
+    // 255: Space Page (Empty)
+    val n = when(encoding.lowercase()) {
+        "pc850" -> 0x02
+        "windows-1252" -> 0x10 // 16
+        "iso-8859-1" -> 0x10 // 16 (Map to 1252)
+        "gbk" -> 0x00 // Usually handled by FS &
+        else -> 0x00 // Default to PC437 or printer default
+    }
+    return byteArrayOf(0x1B, 0x74, n.toByte())
 }

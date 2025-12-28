@@ -189,7 +189,8 @@ Puede ser uno de: `TextItem`, `ImageItem`, `QrItem`, `TableItem`, `DividerItem`.
 
 #### `PrintOptions`
 - `width`: `number` (por defecto: 58)
-- `encoding`: `'utf-8' | 'gbk' | 'ascii' | 'cp1258'` (por defecto: 'utf-8')
+- `encoding`: `'utf-8' | 'gbk' | 'ascii' | 'cp1258' | 'windows-1252' | 'iso-8859-1' | 'pc850'` (por defecto: 'utf-8')
+  > **Nota sobre acentos:** Si tienes problemas con caracteres especiales (á, ñ, etc.), intenta usar `windows-1252` o `pc850`.
 - `lineSpacing`: `number` (por defecto: 30)
 - `feedLines`: `number` (por defecto: 0)
 
