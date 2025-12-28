@@ -11,19 +11,33 @@ Un módulo de Expo potente y fácil de usar para impresión térmica en Android.
 
 ## Instalación
 
+### Desde NPM
 ```bash
 npm install @ronix1020/react-native-ultimate-thermal-printer
 ```
 
+### Desde GitHub
+Si deseas instalar la última versión directamente desde el repositorio:
+
+```bash
+npm install git+https://github.com/TU_USUARIO/react-native-ultimate-thermal-printer.git
+```
+
 ### ⚠️ Importante: Requisito de SDK Propietario
 
-Esta librería depende de un SDK propietario (`posprinterconnectandsendsdk.jar`) que no puede ser distribuido vía NPM debido a restricciones de licencia. Debes obtener este archivo y añadirlo a tu proyecto manualmente.
+Esta librería depende de un SDK propietario (`posprinterconnectandsendsdk.jar`) que no puede ser distribuido vía NPM ni GitHub debido a restricciones de licencia. Debes obtener este archivo y añadirlo a tu proyecto manualmente.
 
 1. **Descarga** el archivo `posprinterconnectandsendsdk.jar` (usualmente proporcionado por el fabricante de tu impresora).
-2. **Colócalo** en el directorio `android/libs` de tu proyecto. Si estás usando Expo con Prebuild (CNG), podrías necesitar usar un config plugin o colocarlo en una ubicación donde la compilación nativa pueda encontrarlo, o manualmente dentro de `node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs/` (not recomendado ya que persiste solo hasta que reinstales).
+2. **Colócalo** en una carpeta segura de tu proyecto (ej. `assets/libs/`).
 
-**Enfoque Recomendado para Expo CNG / Bare Workflow:**
-Asegúrate de que el archivo sea copiado a `node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs/posprinterconnectandsendsdk.jar` usando un script `postinstall` o manualmente para desarrollo.
+**Automatización Recomendada (Script Postinstall):**
+Para asegurar que el archivo se copie correctamente a la librería cada vez que instales dependencias (especialmente útil si instalas desde GitHub donde la carpeta `libs` no existe), añade este script a tu `package.json`:
+
+```json
+"scripts": {
+  "postinstall": "mkdir -p node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs && cp ./assets/libs/posprinterconnectandsendsdk.jar node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs/"
+}
+```
 
 ## Configuración
 
