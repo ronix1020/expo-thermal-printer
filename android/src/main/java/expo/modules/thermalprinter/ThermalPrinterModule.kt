@@ -305,6 +305,12 @@ class ThermalPrinterModule : Module() {
                             val size = (style["size"] as? Number)?.toInt() ?: 0
                             commands.add(getTextSizeCmd(size))
                             
+                            // Adjust line spacing if size > 0 (height scaling)
+                            // size & 0x0F is height multiplier - 1.
+                            // 0 -> 1x, 1 -> 2x, etc.
+                            // Base height ~24 dots. 1x=24, 2x=48.
+                            // val heightMultiplier = (size and 0x0F) + 1
+                            
                             // Font
                             val font = style["font"] as? String ?: "primary"
                             commands.add(getFontCmd(font))
@@ -415,6 +421,7 @@ class ThermalPrinterModule : Module() {
                                 commands.add(getFontCmd(font))
                                 
                                 commands.add(getTwoColumnsCmd(leftText, rightText, width, charset, size, font))
+                                commands.add(byteArrayOf(0x0A))
                                 
                                 // Reset styles
                                 commands.add(getBoldCmd(false))
@@ -566,23 +573,12 @@ fun getAlignCmd(align: String): ByteArray {
 }
 
 fun getBoldCmd(bold: Boolean): ByteArray {
-    // ESC E n (Emphasized) + ESC G n (Double-strike)
-    // Using both ensures bold appearance on more printers
-    val n = if (bold) 0x01.toByte() else 0x00.toByte()
-    return byteArrayOf(0x1B, 0x45, n, 0x1B, 0x47, n)
+    return if (bold) byteArrayOf(0x1B, 0x45, 0x01) else byteArrayOf(0x1B, 0x45, 0x00)
 }
 
 fun getTextSizeCmd(size: Int): ByteArray {
     // GS ! n
-    // If size is small (0-7), assume proportional scaling (width = height)
-    // size 0 = 1x, size 1 = 2x, etc.
-    // Byte construction: (size << 4) | size
-    // If size > 7, assume user provided specific byte (advanced usage)
-    val n = if (size in 0..7) {
-        ((size shl 4) or size).toByte()
-    } else {
-        size.toByte()
-    }
+    val n = size.coerceIn(0, 255).toByte()
     return byteArrayOf(0x1D, 0x21, n)
 }
 
@@ -696,14 +692,9 @@ fun getTwoColumnsCmd(leftText: String, rightText: String, printerWidth: Int, cha
     }
     
     // Adjust for Size (Width scaling)
-    // If size is 0-7, we assume proportional scaling (width = height = size + 1)
-    // If size > 7, we assume it's a raw byte, so width multiplier is (size >> 4) + 1
-    val widthMultiplier = if (size in 0..7) {
-        size + 1
-    } else {
-        (size shr 4) + 1
-    }
-    
+    // GS ! n. Lower 4 bits are height, upper 4 bits are width.
+    // Width multiplier = (n >> 4) + 1.
+    val widthMultiplier = (size shr 4) + 1
     maxChars /= widthMultiplier
     
     val leftLen = leftText.length
@@ -712,13 +703,19 @@ fun getTwoColumnsCmd(leftText: String, rightText: String, printerWidth: Int, cha
     if (leftLen + rightLen >= maxChars) {
         // If they don't fit, just print them with a single space or wrap?
         // Simple approach: Left + Space + Right (will wrap naturally)
-        return "$leftText $rightText\n".toByteArray(charset)
+        return "$leftText $rightText".toByteArray(charset)
     }
     
     val spaces = maxChars - leftLen - rightLen
     val spaceStr = " ".repeat(spaces)
     
-    return "$leftText$spaceStr$rightText\n".toByteArray(charset)
+    return "$leftText$spaceStr$rightText".toByteArray(charset)
+}
+
+fun getPrintAndFeedCmd(n: Int): ByteArray {
+    // ESC J n
+    val feed = n.coerceIn(0, 255).toByte()
+    return byteArrayOf(0x1B, 0x4A, feed)
 }
 
 fun getFontCmd(font: String): ByteArray {
