@@ -566,12 +566,23 @@ fun getAlignCmd(align: String): ByteArray {
 }
 
 fun getBoldCmd(bold: Boolean): ByteArray {
-    return if (bold) byteArrayOf(0x1B, 0x45, 0x01) else byteArrayOf(0x1B, 0x45, 0x00)
+    // ESC E n (Emphasized) + ESC G n (Double-strike)
+    // Using both ensures bold appearance on more printers
+    val n = if (bold) 0x01.toByte() else 0x00.toByte()
+    return byteArrayOf(0x1B, 0x45, n, 0x1B, 0x47, n)
 }
 
 fun getTextSizeCmd(size: Int): ByteArray {
     // GS ! n
-    val n = size.coerceIn(0, 255).toByte()
+    // If size is small (0-7), assume proportional scaling (width = height)
+    // size 0 = 1x, size 1 = 2x, etc.
+    // Byte construction: (size << 4) | size
+    // If size > 7, assume user provided specific byte (advanced usage)
+    val n = if (size in 0..7) {
+        ((size shl 4) or size).toByte()
+    } else {
+        size.toByte()
+    }
     return byteArrayOf(0x1D, 0x21, n)
 }
 
@@ -685,28 +696,14 @@ fun getTwoColumnsCmd(leftText: String, rightText: String, printerWidth: Int, cha
     }
     
     // Adjust for Size (Width scaling)
-    // GS ! n. Lower 4 bits are height, upper 4 bits are width.
-    // We only care about width scaling (upper 4 bits)
-    // But here 'size' is passed as the raw byte value for GS ! n
-    // If user passes 0-7 (standard usage in this lib for simple scaling), it usually means both width and height
-    // Or if they pass the byte directly.
-    // Let's assume 'size' 0 = normal, 1 = double width/height (if using simple logic)
-    // Or if size is the byte: width multiplier is (size >> 4) + 1
-    // Wait, in getTextSizeCmd we use size directly.
-    // If the user follows the lib convention (0-7), usually it maps to width/height.
-    // Let's assume standard GS ! n behavior:
-    // Width multiplier = (n >> 4) + 1.
-    // Height multiplier = (n & 0xF) + 1.
-    // If the user passes a simple integer 0, 1, 16, 17 etc.
+    // If size is 0-7, we assume proportional scaling (width = height = size + 1)
+    // If size > 7, we assume it's a raw byte, so width multiplier is (size >> 4) + 1
+    val widthMultiplier = if (size in 0..7) {
+        size + 1
+    } else {
+        (size shr 4) + 1
+    }
     
-    // However, looking at index.ts, size is just a number.
-    // If the user passes '1', and we send 0x1D 0x21 0x01 -> That is Double Height, Normal Width.
-    // If they want Double Width, they need 0x10 (16).
-    // If they want Double Width & Height, they need 0x11 (17).
-    
-    // Let's assume the user knows what they are doing with 'size' byte, OR we can try to infer.
-    // But for column calculation, we need the WIDTH multiplier.
-    val widthMultiplier = (size shr 4) + 1
     maxChars /= widthMultiplier
     
     val leftLen = leftText.length
