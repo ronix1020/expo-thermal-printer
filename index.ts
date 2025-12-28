@@ -58,7 +58,12 @@ export interface DividerItem extends BasePrinterItem {
   marginVertical?: number;
 }
 
-export type PrinterItem = TextItem | QrItem | ImageItem | TableItem | DividerItem;
+export interface TwoColumnsItem extends BasePrinterItem {
+  type: 'two-columns';
+  content: [string, string]; // [LeftText, RightText]
+}
+
+export type PrinterItem = TextItem | QrItem | ImageItem | TableItem | DividerItem | TwoColumnsItem;
 
 export interface PrintOptions {
   width?: number;

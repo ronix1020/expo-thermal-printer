@@ -398,6 +398,30 @@ class ThermalPrinterModule : Module() {
                                 commands.add(getFeedLinesCmd(marginVertical))
                             }
                         }
+                        "two-columns" -> {
+                            val contentList = item["content"] as? List<String> ?: emptyList()
+                            if (contentList.size >= 2) {
+                                val leftText = contentList[0]
+                                val rightText = contentList[1]
+                                
+                                // Apply styles
+                                val bold = style["bold"] as? Boolean ?: false
+                                commands.add(getBoldCmd(bold))
+                                
+                                val size = (style["size"] as? Number)?.toInt() ?: 0
+                                commands.add(getTextSizeCmd(size))
+                                
+                                val font = style["font"] as? String ?: "primary"
+                                commands.add(getFontCmd(font))
+                                
+                                commands.add(getTwoColumnsCmd(leftText, rightText, width, charset, size, font))
+                                
+                                // Reset styles
+                                commands.add(getBoldCmd(false))
+                                commands.add(getTextSizeCmd(0))
+                                commands.add(getFontCmd("primary"))
+                            }
+                        }
                     }
                     // Reset align to left
                     commands.add(getAlignCmd("left"))
@@ -640,6 +664,64 @@ fun getDividerCmd(charToUse: String, printerWidth: Int, charset: java.nio.charse
     val char = if (charToUse.isNotEmpty()) charToUse[0] else '-'
     val line = char.toString().repeat(maxChars)
     return (line + "\n").toByteArray(charset)
+}
+
+fun getTwoColumnsCmd(leftText: String, rightText: String, printerWidth: Int, charset: java.nio.charset.Charset, size: Int, font: String): ByteArray {
+    // Calculate max chars based on width, font and size
+    // Base chars for Font A (12x24)
+    var maxChars = when {
+        printerWidth >= 80 -> 48
+        printerWidth >= 58 -> 32
+        else -> 24
+    }
+    
+    // Adjust for Font B (9x17) - approx 42 chars for 58mm
+    if (font == "secondary") {
+        maxChars = when {
+            printerWidth >= 80 -> 64
+            printerWidth >= 58 -> 42
+            else -> 32
+        }
+    }
+    
+    // Adjust for Size (Width scaling)
+    // GS ! n. Lower 4 bits are height, upper 4 bits are width.
+    // We only care about width scaling (upper 4 bits)
+    // But here 'size' is passed as the raw byte value for GS ! n
+    // If user passes 0-7 (standard usage in this lib for simple scaling), it usually means both width and height
+    // Or if they pass the byte directly.
+    // Let's assume 'size' 0 = normal, 1 = double width/height (if using simple logic)
+    // Or if size is the byte: width multiplier is (size >> 4) + 1
+    // Wait, in getTextSizeCmd we use size directly.
+    // If the user follows the lib convention (0-7), usually it maps to width/height.
+    // Let's assume standard GS ! n behavior:
+    // Width multiplier = (n >> 4) + 1.
+    // Height multiplier = (n & 0xF) + 1.
+    // If the user passes a simple integer 0, 1, 16, 17 etc.
+    
+    // However, looking at index.ts, size is just a number.
+    // If the user passes '1', and we send 0x1D 0x21 0x01 -> That is Double Height, Normal Width.
+    // If they want Double Width, they need 0x10 (16).
+    // If they want Double Width & Height, they need 0x11 (17).
+    
+    // Let's assume the user knows what they are doing with 'size' byte, OR we can try to infer.
+    // But for column calculation, we need the WIDTH multiplier.
+    val widthMultiplier = (size shr 4) + 1
+    maxChars /= widthMultiplier
+    
+    val leftLen = leftText.length
+    val rightLen = rightText.length
+    
+    if (leftLen + rightLen >= maxChars) {
+        // If they don't fit, just print them with a single space or wrap?
+        // Simple approach: Left + Space + Right (will wrap naturally)
+        return "$leftText $rightText\n".toByteArray(charset)
+    }
+    
+    val spaces = maxChars - leftLen - rightLen
+    val spaceStr = " ".repeat(spaces)
+    
+    return "$leftText$spaceStr$rightText\n".toByteArray(charset)
 }
 
 fun getFontCmd(font: String): ByteArray {

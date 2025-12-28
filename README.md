@@ -179,13 +179,22 @@ await ThermalPrinter.disconnect();
 ### Tipos
 
 #### `PrinterItem`
-Puede ser uno de: `TextItem`, `ImageItem`, `QrItem`, `TableItem`, `DividerItem`.
+Puede ser uno de: `TextItem`, `ImageItem`, `QrItem`, `TableItem`, `DividerItem`, `TwoColumnsItem`.
 
 **Propiedades de Estilo Comunes (`PrinterItemStyle`):**
 - `align`: `'left' | 'center' | 'right'` (izquierda, centro, derecha)
 - `bold`: `boolean` (negrita)
 - `size`: `number` (0-7 para texto, tamaño de módulo para QR)
 - `font`: `'primary' | 'secondary'` (fuente primaria o secundaria)
+
+**Ejemplo de `TwoColumnsItem`:**
+```typescript
+{
+  type: 'two-columns',
+  content: ['Izquierda', 'Derecha'], // Se imprimirán en la misma línea con espacio entre ellos
+  style: { bold: true } // Opcional
+}
+```
 
 #### `PrintOptions`
 - `width`: `number` (por defecto: 58)
