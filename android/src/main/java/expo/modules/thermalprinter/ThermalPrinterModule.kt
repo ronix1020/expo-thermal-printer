@@ -324,7 +324,17 @@ class ThermalPrinterModule : Module() {
                             commands.add(getFontCmd("primary"))
                         }
                         "qr" -> {
-                            val size = (style["size"] as? Number)?.toInt() ?: 6
+                            // Try to get size from style, then from item root
+                            val sizeObj = style["size"] ?: item["size"]
+                            var size = when (sizeObj) {
+                                is Number -> sizeObj.toInt()
+                                is String -> sizeObj.toIntOrNull()
+                                else -> null
+                            } ?: 6
+                            
+                            // Clamp size to valid range (1-16) usually
+                            size = size.coerceIn(1, 16)
+
                             commands.add(getQrCodeCmd(content, size))
                             commands.add(byteArrayOf(0x0A))
                         }
