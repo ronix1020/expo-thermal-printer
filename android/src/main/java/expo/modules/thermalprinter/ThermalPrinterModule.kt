@@ -500,13 +500,18 @@ fun getTableCmd(header: List<String>, columnWidths: List<Number>, content: List<
         else -> 24
     }
     
-    // Calculate column widths in chars
-    val colChars = columnWidths.map { (it.toDouble() / 100.0 * maxChars).toInt() }.toMutableList()
+    // Calculate spacing
+    val numColumns = columnWidths.size
+    val totalSpacing = if (numColumns > 1) numColumns - 1 else 0
+    val availableChars = maxChars - totalSpacing
+    
+    // Calculate column widths in chars based on available space
+    val colChars = columnWidths.map { (it.toDouble() / 100.0 * availableChars).toInt() }.toMutableList()
     
     // Adjust last column to fill remaining space due to rounding
     val currentTotal = colChars.sum()
-    if (currentTotal < maxChars && colChars.isNotEmpty()) {
-        colChars[colChars.lastIndex] += (maxChars - currentTotal)
+    if (currentTotal < availableChars && colChars.isNotEmpty()) {
+        colChars[colChars.lastIndex] += (availableChars - currentTotal)
     }
 
     // Helper to print a row
@@ -533,6 +538,11 @@ fun getTableCmd(header: List<String>, columnWidths: List<Number>, content: List<
                 val finalText = if (paddedText.length > width) paddedText.substring(0, width) else paddedText
                 
                 stream.write(finalText.toByteArray(charset))
+                
+                // Add spacing if not last column
+                if (j < colChars.size - 1) {
+                    stream.write(" ".toByteArray(charset))
+                }
             }
             stream.write(byteArrayOf(0x0A)) // New line
         }
