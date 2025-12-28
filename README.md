@@ -1,0 +1,184 @@
+# @ronix1020/react-native-ultimate-thermal-printer
+
+Un módulo de Expo potente y fácil de usar para impresión térmica en Android. Esta librería soporta conexiones por **Bluetooth** y **USB**, y proporciona una API completa para imprimir texto, imágenes, códigos QR, tablas y divisores con estilos personalizables.
+
+## Características
+
+- 🖨️ **Conectividad Dual**: Soporte para impresoras térmicas Bluetooth (Clásico y BLE) y USB.
+- 📝 **Contenido Rico**: Imprime texto, imágenes (Base64/URL), códigos QR, tablas y divisores.
+- 🎨 **Estilos**: Personaliza la alineación del texto, tamaño, negrita y fuentes.
+- 🚀 **Compatible con Expo**: Construido como un Módulo Nativo de Expo.
+
+## Instalación
+
+```bash
+npm install @ronix1020/react-native-ultimate-thermal-printer
+```
+
+### ⚠️ Importante: Requisito de SDK Propietario
+
+Esta librería depende de un SDK propietario (`posprinterconnectandsendsdk.jar`) que no puede ser distribuido vía NPM debido a restricciones de licencia. Debes obtener este archivo y añadirlo a tu proyecto manualmente.
+
+1. **Descarga** el archivo `posprinterconnectandsendsdk.jar` (usualmente proporcionado por el fabricante de tu impresora).
+2. **Colócalo** en el directorio `android/libs` de tu proyecto. Si estás usando Expo con Prebuild (CNG), podrías necesitar usar un config plugin o colocarlo en una ubicación donde la compilación nativa pueda encontrarlo, o manualmente dentro de `node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs/` (not recomendado ya que persiste solo hasta que reinstales).
+
+**Enfoque Recomendado para Expo CNG / Bare Workflow:**
+Asegúrate de que el archivo sea copiado a `node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs/posprinterconnectandsendsdk.jar` usando un script `postinstall` o manualmente para desarrollo.
+
+## Configuración
+
+### Permisos de Android
+
+Añade los siguientes permisos a tu `app.json` o `AndroidManifest.xml`:
+
+```json
+{
+  "android": {
+    "permissions": [
+      "android.permission.BLUETOOTH",
+      "android.permission.BLUETOOTH_ADMIN",
+      "android.permission.BLUETOOTH_CONNECT",
+      "android.permission.BLUETOOTH_SCAN",
+      "android.permission.ACCESS_FINE_LOCATION"
+    ]
+  }
+}
+```
+
+*Nota: El permiso de ubicación es requerido para el escaneo Bluetooth en Android.*
+
+## Uso
+
+### Importar
+
+```typescript
+import * as ThermalPrinter from "@ronix1020/react-native-ultimate-thermal-printer";
+```
+
+### Escanear Dispositivos (Bluetooth)
+
+```typescript
+const escanear = async () => {
+  try {
+    // 'paired' para dispositivos vinculados, 'all' para escanear dispositivos cercanos
+    const dispositivos = await ThermalPrinter.scanDevices('paired');
+    console.log(dispositivos);
+  } catch (error) {
+    console.error(error);
+  }
+};
+```
+
+### Conectar
+
+**Bluetooth:**
+```typescript
+await ThermalPrinter.connect("00:11:22:33:44:55");
+```
+
+**USB:**
+```typescript
+const nombreDispositivo = await ThermalPrinter.connectUsb();
+console.log(`Conectado a dispositivo USB: ${nombreDispositivo}`);
+```
+
+### Imprimir
+
+La función `print` toma un array de ítems para imprimir y un objeto de configuración opcional.
+
+```typescript
+const imprimirTicket = async () => {
+  try {
+    await ThermalPrinter.print([
+      {
+        type: 'text',
+        content: 'MI TIENDA\n',
+        style: { align: 'center', size: 1, bold: true }
+      },
+      {
+        type: 'divider',
+        charToUse: '-'
+      },
+      {
+        type: 'text',
+        content: 'Fecha: 2023-10-27\nHora: 10:30 AM\n',
+        style: { align: 'left' }
+      },
+      {
+        type: 'table',
+        columnWidths: [20, 6, 6], // Anchos en caracteres
+        content: [
+          ['Producto A', '1', '$10'],
+          ['Producto B', '2', '$20'],
+        ]
+      },
+      {
+        type: 'divider'
+      },
+      {
+        type: 'text',
+        content: 'Total: $50.00\n',
+        style: { align: 'right', bold: true }
+      },
+      {
+        type: 'qr',
+        content: 'https://ejemplo.com',
+        style: { align: 'center', size: 8 }
+      },
+      {
+        type: 'text',
+        content: '\n\n\n' // Líneas de alimentación (feed)
+      }
+    ], {
+      width: 58, // Ancho de la impresora en mm (58 u 80)
+      encoding: 'utf-8'
+    });
+  } catch (error) {
+    console.error("Error al imprimir:", error);
+  }
+};
+```
+
+### Desconectar
+
+```typescript
+await ThermalPrinter.disconnect();
+```
+
+## Referencia de la API
+
+### Métodos
+
+- **`scanDevices(type: 'paired' | 'all'): Promise<Device[]>`**
+  Escanea dispositivos Bluetooth disponibles.
+- **`connect(macAddress: string): Promise<void>`**
+  Conecta a un dispositivo Bluetooth por dirección MAC.
+- **`connectUsb(): Promise<string>`**
+  Conecta a la primera impresora USB disponible. Retorna el nombre del dispositivo.
+- **`disconnect(): Promise<void>`**
+  Cierra la conexión actual.
+- **`isConnected(): Promise<boolean>`**
+  Verifica si una impresora está conectada actualmente.
+- **`print(items: PrinterItem[], options?: PrintOptions): Promise<void>`**
+  Envía datos a la impresora.
+
+### Tipos
+
+#### `PrinterItem`
+Puede ser uno de: `TextItem`, `ImageItem`, `QrItem`, `TableItem`, `DividerItem`.
+
+**Propiedades de Estilo Comunes (`PrinterItemStyle`):**
+- `align`: `'left' | 'center' | 'right'` (izquierda, centro, derecha)
+- `bold`: `boolean` (negrita)
+- `size`: `number` (0-7 para texto, tamaño de módulo para QR)
+- `font`: `'primary' | 'secondary'` (fuente primaria o secundaria)
+
+#### `PrintOptions`
+- `width`: `number` (por defecto: 58)
+- `encoding`: `'utf-8' | 'gbk' | 'ascii' | 'cp1258'` (por defecto: 'utf-8')
+- `lineSpacing`: `number` (por defecto: 30)
+- `feedLines`: `number` (por defecto: 0)
+
+## Licencia
+
+MIT
