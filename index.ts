@@ -71,7 +71,15 @@ export interface PrintOptions {
   encoding?: PrinterEncoding;
   lineSpacing?: number;
   feedLines?: number;
+  unaccent?: boolean;
 }
+
+const normalizeText = (text: string) => {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7E\n]/g, ""); // Keep printable ASCII and newlines
+};
 
 export async function scanDevices(type: 'paired' | 'all' = 'paired'): Promise<Device[]> {
   return await ThermalPrinterModule.scanDevices(type);
@@ -93,8 +101,32 @@ export async function print(
   items: PrinterItem[],
   options: PrintOptions = {}
 ): Promise<void> {
+  let itemsToPrint = items;
+
+  if (options.unaccent) {
+    itemsToPrint = items.map(item => {
+      const newItem = { ...item };
+      
+      if (newItem.type === 'text') {
+        newItem.content = normalizeText(newItem.content);
+      } else if (newItem.type === 'two-columns') {
+        newItem.content = [normalizeText(newItem.content[0]), normalizeText(newItem.content[1])];
+      } else if (newItem.type === 'table') {
+        if (newItem.tableHeader) {
+          newItem.tableHeader = newItem.tableHeader.map(h => normalizeText(h));
+        }
+        newItem.content = newItem.content.map(row => row.map(cell => normalizeText(cell)));
+      } else if (newItem.type === 'divider' && newItem.charToUse) {
+        newItem.charToUse = normalizeText(newItem.charToUse);
+      }
+      // We generally don't normalize QR codes or Images as they are data/binary
+      
+      return newItem;
+    });
+  }
+
   return await ThermalPrinterModule.print(
-    items,
+    itemsToPrint,
     options.width || 58,
     options.encoding || "utf-8",
     options.lineSpacing || 30,
