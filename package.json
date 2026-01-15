@@ -1,6 +1,6 @@
 {
   "name": "@ronix1020/react-native-ultimate-thermal-printer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Native thermal printer module for Expo in Developer Client",
   "main": "index.ts",
   "types": "index.ts",
@@ -23,6 +23,11 @@
     "thermal-printer",
     "bluetooth"
   ],
+  "homepage": "https://github.com/ronix1020/printer-native",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ronix1020/printer-native.git"
+  },
   "author": "ronix1020",
   "license": "MIT",
   "peerDependencies": {

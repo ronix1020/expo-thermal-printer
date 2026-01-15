@@ -1,7 +1,10 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "ios"],
   "android": {
     "package": "expo.modules.thermalprinter",
     "modules": ["expo.modules.thermalprinter.ThermalPrinterModule"]
+  },
+  "ios": {
+    "modules": ["ThermalPrinterModule"]
   }
 }
