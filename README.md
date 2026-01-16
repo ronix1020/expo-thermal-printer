@@ -11,11 +11,6 @@ Un módulo de Expo potente y fácil de usar para impresión térmica en Android.
 
 ## Instalación
 
-### Desde NPM
-```bash
-npm install @ronix1020/react-native-ultimate-thermal-printer
-```
-
 ### Desde GitHub
 Si deseas instalar la última versión directamente desde el repositorio:
 
