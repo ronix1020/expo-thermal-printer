@@ -94,6 +94,94 @@ class PrinterUtils {
         }
         return result
     }
+
+    static func getTableCmd(header: [String],
+                            columnWidths: [NSNumber],
+                            columnAlignment: [String],
+                            content: [[String]],
+                            printerWidth: Int,
+                            encoding: String.Encoding) -> [UInt8] {
+        var bytes: [UInt8] = []
+
+        if header.isEmpty && content.isEmpty { return bytes }
+
+        let numColumns = columnWidths.count
+        if numColumns == 0 { return bytes }
+
+        let maxChars: Int
+        if printerWidth >= 80 { maxChars = 48 }
+        else if printerWidth >= 58 { maxChars = 32 }
+        else { maxChars = 24 }
+
+        let totalSpacing = numColumns > 1 ? numColumns - 1 : 0
+        let availableChars = maxChars - totalSpacing
+        if availableChars <= 0 { return bytes }
+
+        var colChars: [Int] = columnWidths.map {
+            Int(floor($0.doubleValue / 100.0 * Double(availableChars)))
+        }
+        let currentTotal = colChars.reduce(0, +)
+        if currentTotal < availableChars, let last = colChars.indices.last {
+            colChars[last] += (availableChars - currentTotal)
+        }
+
+        func pad(_ text: String, width: Int, align: String) -> String {
+            if text.count >= width {
+                if text.count == width { return text }
+                let endIdx = text.index(text.startIndex, offsetBy: width)
+                return String(text[..<endIdx])
+            }
+            let totalSpaces = width - text.count
+            switch align.lowercased() {
+            case "right":
+                return String(repeating: " ", count: totalSpaces) + text
+            case "center":
+                let leftSpaces = totalSpaces / 2
+                let rightSpaces = totalSpaces - leftSpaces
+                return String(repeating: " ", count: leftSpaces) + text + String(repeating: " ", count: rightSpaces)
+            default:
+                return text + String(repeating: " ", count: totalSpaces)
+            }
+        }
+
+        func appendRow(_ row: [String]) {
+            var cellLines: [[String]] = []
+            for index in 0..<colChars.count {
+                let text = index < row.count ? row[index] : ""
+                let width = colChars[index]
+                if width > 0 {
+                    cellLines.append(splitText(text, width: width))
+                } else {
+                    cellLines.append([""])
+                }
+            }
+            let maxLines = cellLines.map { $0.count }.max() ?? 0
+            if maxLines == 0 { return }
+
+            for i in 0..<maxLines {
+                for j in 0..<colChars.count {
+                    let width = colChars[j]
+                    let lines = cellLines[j]
+                    let cellText = i < lines.count ? lines[i] : ""
+                    let align = j < columnAlignment.count ? columnAlignment[j] : "left"
+                    let finalText = pad(cellText, width: width, align: align)
+
+                    bytes.append(contentsOf: stringToBytes(finalText, encoding: encoding))
+
+                    if j < colChars.count - 1 {
+                        bytes.append(contentsOf: stringToBytes(" ", encoding: encoding))
+                    }
+                }
+                bytes.append(0x0A)
+            }
+        }
+
+        if !header.isEmpty { appendRow(header) }
+        for row in content { appendRow(row) }
+
+        return bytes
+    }
+
         static func bitmapToBytes(_ image: UIImage, maxWidth: Int) -> [UInt8] {
         var finalImage = image
         let width = Int(image.size.width)

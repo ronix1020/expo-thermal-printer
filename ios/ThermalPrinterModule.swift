@@ -301,6 +301,24 @@ public class ThermalPrinterModule: Module {
                   bytes.append(contentsOf: PrinterUtils.getFeedLinesCmd(marginVertical))
               }
               
+          case "table":
+              let header = item["tableHeader"] as? [String] ?? []
+              let columnWidths = item["columnWidths"] as? [NSNumber] ?? []
+              let columnAlignment = item["columnAlignment"] as? [String] ?? []
+              let contentList = item["content"] as? [[String]] ?? []
+
+              if !columnWidths.isEmpty {
+                  let tableBytes = PrinterUtils.getTableCmd(
+                      header: header,
+                      columnWidths: columnWidths,
+                      columnAlignment: columnAlignment,
+                      content: contentList,
+                      printerWidth: width,
+                      encoding: .utf8
+                  )
+                  bytes.append(contentsOf: tableBytes)
+              }
+
           case "two-columns":
              let contentList = item["content"] as? [String] ?? []
              if contentList.count >= 2 {
