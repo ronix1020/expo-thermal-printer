@@ -50,12 +50,33 @@ class PrinterUtils {
         }
         return [0x1B, 0x74, n]
     }
-    
+
+    static func resolveEncoding(_ encoding: String) -> String.Encoding {
+        switch encoding.lowercased() {
+        case "pc850":
+            let cf = CFStringEncoding(CFStringEncodings.dosLatin1.rawValue)
+            return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
+        case "windows-1252":
+            return .windowsCP1252
+        case "iso-8859-1":
+            return .isoLatin1
+        case "gbk":
+            let cf = CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
+        case "utf-8", "utf8":
+            return .utf8
+        default:
+            return .utf8
+        }
+    }
+
     static func stringToBytes(_ text: String, encoding: String.Encoding) -> [UInt8] {
-        if let data = text.data(using: encoding) {
+        // allowLossyConversion mirrors Kotlin's String.toByteArray(charset): chars outside
+        // the target encoding become '?' instead of failing the whole conversion.
+        if let data = text.data(using: encoding, allowLossyConversion: true) {
             return [UInt8](data)
         }
-        return []
+        return [UInt8](text.data(using: .utf8) ?? Data())
     }
     
     static func getQrCodeCmd(_ text: String, size: Int) -> [UInt8] {

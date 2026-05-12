@@ -208,13 +208,15 @@ public class ThermalPrinterModule: Module {
 
     AsyncFunction("print") { (items: [[String: Any]], width: Int, encoding: String, lineSpacing: Int, feedLines: Int, promise: Promise) in
       var bytes: [UInt8] = []
-      
+
+      let resolvedEncoding = PrinterUtils.resolveEncoding(encoding)
+
       // Initialize Printer
       bytes.append(contentsOf: [0x1B, 0x40])
-      
+
       // Set Code Page
       bytes.append(contentsOf: PrinterUtils.getCodePageCmd(encoding))
-      
+
       // Set Line Spacing
       bytes.append(contentsOf: PrinterUtils.getLineSpacingCmd(lineSpacing))
       
@@ -237,9 +239,7 @@ public class ThermalPrinterModule: Module {
               let font = style["font"] as? String ?? "primary"
               bytes.append(contentsOf: PrinterUtils.getFontCmd(font))
               
-              if let textData = content.data(using: .utf8) { // Simply utf8 for now, ideally handle encoding mapping
-                  bytes.append(contentsOf: [UInt8](textData))
-              }
+              bytes.append(contentsOf: PrinterUtils.stringToBytes(content, encoding: resolvedEncoding))
               bytes.append(0x0A) // LF
               
               // Reset
@@ -292,9 +292,7 @@ public class ThermalPrinterModule: Module {
               let maxChars = (width >= 80) ? 48 : ((width >= 58) ? 32 : 24)
               let charStr = String(charToUse.prefix(1))
               let line = String(repeating: charStr, count: maxChars)
-              if let d = line.data(using: .utf8) {
-                   bytes.append(contentsOf: [UInt8](d))
-              }
+              bytes.append(contentsOf: PrinterUtils.stringToBytes(line, encoding: resolvedEncoding))
               bytes.append(0x0A)
               
               if marginVertical > 0 {
@@ -314,7 +312,7 @@ public class ThermalPrinterModule: Module {
                       columnAlignment: columnAlignment,
                       content: contentList,
                       printerWidth: width,
-                      encoding: .utf8
+                      encoding: resolvedEncoding
                   )
                   bytes.append(contentsOf: tableBytes)
               }
@@ -334,7 +332,7 @@ public class ThermalPrinterModule: Module {
                  let font = style["font"] as? String ?? "primary"
                  bytes.append(contentsOf: PrinterUtils.getFontCmd(font))
                  
-                 bytes.append(contentsOf: PrinterUtils.getTwoColumnsCmd(left, right, width, .utf8))
+                 bytes.append(contentsOf: PrinterUtils.getTwoColumnsCmd(left, right, width, resolvedEncoding))
                  bytes.append(0x0A)
                  
                  // Reset
