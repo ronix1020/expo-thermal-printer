@@ -13,14 +13,41 @@ export type Device = {
   macAddress: string;
 };
 
-export type PrinterEncoding = 'utf-8' | 'gbk' | 'ascii' | 'cp1258' | 'windows-1252' | 'iso-8859-1' | 'pc850';
+/**
+ * Supported encodings plus accepted aliases. Aliases are normalized natively
+ * before charset/code-page selection:
+ *   utf8 -> utf-8
+ *   iso8859_1 | iso88591 | latin1 -> iso-8859-1
+ *   win1252 -> windows-1252
+ */
+export type PrinterEncoding =
+  | 'utf-8' | 'utf8'
+  | 'gbk'
+  | 'ascii'
+  | 'cp1258'
+  | 'windows-1252' | 'win1252'
+  | 'iso-8859-1' | 'iso8859_1' | 'iso88591' | 'latin1'
+  | 'pc850';
 export type PrinterAlign = 'left' | 'center' | 'right';
 export type PrinterFont = 'primary' | 'secondary';
+
+/**
+ * Semantic text sizes. Mapped natively to ESC/POS `GS ! n`:
+ *   'small' | 'normal' -> 0x00 (1x)
+ *   'large'            -> 0x01 (double height only — safe on 58mm)
+ *   'xlarge'           -> 0x11 (double height + double width)
+ */
+export type PrinterTextSize = 'small' | 'normal' | 'large' | 'xlarge';
 
 export interface PrinterItemStyle {
   bold?: boolean;
   align?: PrinterAlign;
-  size?: number; // 0-7 for text, module size for QR
+  /**
+   * Text size. Accepts either a raw ESC/POS `GS ! n` byte (number, e.g. `0x11`)
+   * or a semantic string (`'small' | 'normal' | 'large' | 'xlarge'`).
+   * For QR items this is the module size (1-16).
+   */
+  size?: number | PrinterTextSize;
   font?: PrinterFont;
   width?: number; // Image width in pixels
   height?: number; // Image height in pixels
@@ -48,6 +75,13 @@ export interface ImageItem extends BasePrinterItem {
 export interface TableItem extends BasePrinterItem {
   type: 'table';
   tableHeader?: string[];
+  /**
+   * Column widths. Interpreted natively in one of two ways:
+   *   - **Absolute char counts** when `sum(columnWidths) <= maxChars` for the
+   *     paper (32 for 58mm, 48 for 80mm). Values are used as-is.
+   *   - **Percentages** otherwise (e.g. summing ~100). Each value is taken as a
+   *     percentage of the available width.
+   */
   columnWidths: number[];
   columnAlignment?: PrinterAlign[]; // Alignment for each column
   content: string[][];
@@ -55,16 +89,35 @@ export interface TableItem extends BasePrinterItem {
 
 export interface DividerItem extends BasePrinterItem {
   type: 'divider';
+  /** Canonical divider character field. `char`/`content` accepted as aliases. */
   charToUse?: string;
+  char?: string;
+  content?: string;
   marginVertical?: number;
 }
 
 export interface TwoColumnsItem extends BasePrinterItem {
   type: 'two-columns';
-  content: [string, string]; // [LeftText, RightText]
+  /** Canonical form: `[LeftText, RightText]`. `left`/`right` accepted as aliases. */
+  content?: [string, string];
+  left?: string;
+  right?: string;
 }
 
-export type PrinterItem = TextItem | QrItem | ImageItem | TableItem | DividerItem | TwoColumnsItem;
+export interface FeedItem {
+  type: 'feed';
+  /** Number of blank lines to feed. Defaults to 1. */
+  lines?: number;
+}
+
+export type PrinterItem =
+  | TextItem
+  | QrItem
+  | ImageItem
+  | TableItem
+  | DividerItem
+  | TwoColumnsItem
+  | FeedItem;
 
 export interface PrintOptions {
   width?: number;
@@ -110,14 +163,22 @@ export async function print(
       if (newItem.type === 'text') {
         newItem.content = normalizeText(newItem.content);
       } else if (newItem.type === 'two-columns') {
-        newItem.content = [normalizeText(newItem.content[0]), normalizeText(newItem.content[1])];
+        // Canonical [left, right] and the left/right aliases are both normalized.
+        if (newItem.content) {
+          newItem.content = [normalizeText(newItem.content[0]), normalizeText(newItem.content[1])];
+        }
+        if (typeof newItem.left === 'string') newItem.left = normalizeText(newItem.left);
+        if (typeof newItem.right === 'string') newItem.right = normalizeText(newItem.right);
       } else if (newItem.type === 'table') {
         if (newItem.tableHeader) {
           newItem.tableHeader = newItem.tableHeader.map(h => normalizeText(h));
         }
         newItem.content = newItem.content.map(row => row.map(cell => normalizeText(cell)));
-      } else if (newItem.type === 'divider' && newItem.charToUse) {
-        newItem.charToUse = normalizeText(newItem.charToUse);
+      } else if (newItem.type === 'divider') {
+        // charToUse plus the char/content aliases are all normalized.
+        if (newItem.charToUse) newItem.charToUse = normalizeText(newItem.charToUse);
+        if (newItem.char) newItem.char = normalizeText(newItem.char);
+        if (typeof newItem.content === 'string') newItem.content = normalizeText(newItem.content);
       }
       // We generally don't normalize QR codes or Images as they are data/binary
       

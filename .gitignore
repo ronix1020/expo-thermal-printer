@@ -5,3 +5,5 @@ android/libs/*.jar
 .DS_Store
 dist/
 .expo/
+
+build/

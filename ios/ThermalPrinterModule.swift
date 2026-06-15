@@ -18,7 +18,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func scanDevices(_ promise: Promise) {
     if centralManager.state != .poweredOn {
-      promise.reject("BLUETOOTH_OFF", "Bluetooth is not powered on")
+      promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not powered on")
       return
     }
     
@@ -40,7 +40,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func write(_ data: Data, _ promise: Promise) {
     guard let peripheral = connectedPeripheral, let characteristic = writeCharacteristic else {
-        promise.reject("NOT_CONNECTED", "Not connected to any printer")
+        promise.reject("SERVICE_NOT_BOUND", "Not connected to any printer")
         return
     }
     
@@ -72,7 +72,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
      if let error = error {
-         writePromise?.reject("WRITE_FAILED", error.localizedDescription)
+         writePromise?.reject("PRINT_FAILED", error.localizedDescription)
      } else {
          writePromise?.resolve(nil)
      }
@@ -120,13 +120,31 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
   }
   func connect(_ uuid: String, _ promise: Promise) {
-    guard let peripheral = discoveredPeripherals.first(where: { $0.identifier.uuidString == uuid }) else {
-      promise.reject("DEVICE_NOT_FOUND", "Device with UUID \(uuid) not found in scan results")
-      return
+    attemptConnect(uuid, promise, retriesLeft: 3)
+  }
+
+  // The central manager initializes its state asynchronously; on a cold start
+  // the state may still be .unknown/.resetting. Retry briefly before giving up.
+  private func attemptConnect(_ uuid: String, _ promise: Promise, retriesLeft: Int) {
+    switch centralManager.state {
+    case .poweredOn:
+      guard let peripheral = discoveredPeripherals.first(where: { $0.identifier.uuidString == uuid }) else {
+        promise.reject("DEVICE_NOT_FOUND", "Device with UUID \(uuid) not found in scan results")
+        return
+      }
+      connectPromise = promise
+      centralManager.connect(peripheral, options: nil)
+    case .unknown, .resetting:
+      if retriesLeft > 0 {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+          self.attemptConnect(uuid, promise, retriesLeft: retriesLeft - 1)
+        }
+      } else {
+        promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not ready")
+      }
+    default:
+      promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not powered on")
     }
-    
-    connectPromise = promise
-    centralManager.connect(peripheral, options: nil)
   }
   
   func disconnect(_ promise: Promise) {
@@ -148,7 +166,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   }
   
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-    connectPromise?.reject("CONNECT_FAILED", error?.localizedDescription ?? "Unknown error")
+    connectPromise?.reject("CONNECTION_FAILED", error?.localizedDescription ?? "Unknown error")
     connectPromise = nil
   }
   
@@ -160,7 +178,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     if let error = error {
-        connectPromise?.reject("SERVICE_DISCOVERY_FAILED", error.localizedDescription)
+        connectPromise?.reject("CONNECTION_FAILED", error.localizedDescription)
         connectPromise = nil
         return
     }
@@ -232,13 +250,13 @@ public class ThermalPrinterModule: Module {
           case "text":
               let bold = style["bold"] as? Bool ?? false
               bytes.append(contentsOf: PrinterUtils.getBoldCmd(bold))
-              
-              let size = style["size"] as? Int ?? 0
+
+              let size = PrinterUtils.resolveSize(style["size"])
               bytes.append(contentsOf: PrinterUtils.getTextSizeCmd(size))
-              
+
               let font = style["font"] as? String ?? "primary"
               bytes.append(contentsOf: PrinterUtils.getFontCmd(font))
-              
+
               bytes.append(contentsOf: PrinterUtils.stringToBytes(content, encoding: resolvedEncoding))
               bytes.append(0x0A) // LF
               
@@ -280,8 +298,13 @@ public class ThermalPrinterModule: Module {
                    bytes.append(0x0A)
               }
               
+          case "feed":
+              let n = (item["lines"] as? NSNumber)?.intValue ?? 1
+              bytes.append(contentsOf: PrinterUtils.getFeedLinesCmd(n))
+
           case "divider":
-              let charToUse = item["charToUse"] as? String ?? "-"
+              // Accept charToUse plus char/content aliases.
+              let charToUse = (item["charToUse"] as? String) ?? (item["char"] as? String) ?? (item["content"] as? String) ?? "-"
               let marginVertical = (item["marginVertical"] as? NSNumber)?.intValue ?? 0
               
               if marginVertical > 0 {
@@ -318,23 +341,24 @@ public class ThermalPrinterModule: Module {
               }
 
           case "two-columns":
-             let contentList = item["content"] as? [String] ?? []
+             // Accept canonical content:[l,r] plus left/right aliases.
+             let contentList = (item["content"] as? [String]) ?? [item["left"] as? String, item["right"] as? String].compactMap { $0 }
              if contentList.count >= 2 {
                  let left = contentList[0]
                  let right = contentList[1]
-                 
+
                  let bold = style["bold"] as? Bool ?? false
                  bytes.append(contentsOf: PrinterUtils.getBoldCmd(bold))
-                  
-                 let size = style["size"] as? Int ?? 0
+
+                 let size = PrinterUtils.resolveSize(style["size"])
                  bytes.append(contentsOf: PrinterUtils.getTextSizeCmd(size))
-                  
+
                  let font = style["font"] as? String ?? "primary"
                  bytes.append(contentsOf: PrinterUtils.getFontCmd(font))
-                 
-                 bytes.append(contentsOf: PrinterUtils.getTwoColumnsCmd(left, right, width, resolvedEncoding))
+
+                 bytes.append(contentsOf: PrinterUtils.getTwoColumnsCmd(left, right, width, resolvedEncoding, size, font))
                  bytes.append(0x0A)
-                 
+
                  // Reset
                  bytes.append(contentsOf: PrinterUtils.getBoldCmd(false))
                  bytes.append(contentsOf: PrinterUtils.getTextSizeCmd(0))
@@ -342,7 +366,7 @@ public class ThermalPrinterModule: Module {
              }
 
           default:
-              break
+              NSLog("[ThermalPrinter] Unknown item type: \(type)")
           }
           
           // Reset align

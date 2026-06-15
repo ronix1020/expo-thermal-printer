@@ -121,12 +121,12 @@ class ThermalPrinterModule : Module() {
         AsyncFunction("scanDevices") { type: String, promise: Promise ->
             val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
             if (bluetoothAdapter == null) {
-                promise.reject("NO_BLUETOOTH", "Bluetooth not supported", null)
+                promise.reject("BLUETOOTH_NOT_READY", "Bluetooth not supported", null)
                 return@AsyncFunction
             }
 
             if (!bluetoothAdapter.isEnabled) {
-                 promise.reject("BLUETOOTH_DISABLED", "Bluetooth is disabled", null)
+                 promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is disabled", null)
                  return@AsyncFunction
             }
 
@@ -170,11 +170,25 @@ class ThermalPrinterModule : Module() {
         }
 
         AsyncFunction("connect") { macAddress: String, promise: Promise ->
-            if (myBinder == null) {
-                promise.reject("SERVICE_NOT_BOUND", "Service not bound", null)
+            // Fail fast and clearly when Bluetooth isn't ready.
+            val adapter = BluetoothAdapter.getDefaultAdapter()
+            if (adapter == null || !adapter.isEnabled) {
+                promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not enabled", null)
                 return@AsyncFunction
             }
-            
+
+            // The printer service binds asynchronously in OnCreate; on a cold start
+            // it may not be ready yet. Wait briefly before giving up.
+            var waited = 0
+            while (myBinder == null && waited < 2000) {
+                Thread.sleep(100)
+                waited += 100
+            }
+            if (myBinder == null) {
+                promise.reject("SERVICE_NOT_BOUND", "Printer service not bound", null)
+                return@AsyncFunction
+            }
+
             myBinder?.connectBtPort(macAddress, object : UiExecute {
                 override fun onsucess() { // Assuming method name based on typos common in these SDKs or standard naming
                      promise.resolve(null)
@@ -209,7 +223,7 @@ class ThermalPrinterModule : Module() {
             }
 
             if (printerDevice == null) {
-                promise.reject("NO_PRINTER_FOUND", "No USB printer found", null)
+                promise.reject("DEVICE_NOT_FOUND", "No USB printer found", null)
                 return@AsyncFunction
             }
 
@@ -266,7 +280,7 @@ class ThermalPrinterModule : Module() {
 
             try {
                 val commands = ArrayList<ByteArray>()
-                val charsetName = when(encoding.lowercase()) {
+                val charsetName = when(normalizeEncoding(encoding)) {
                     "gbk" -> "GBK"
                     "ascii" -> "US-ASCII"
                     "cp1258" -> "windows-1258"
@@ -301,8 +315,8 @@ class ThermalPrinterModule : Module() {
                             val bold = style["bold"] as? Boolean ?: false
                             commands.add(getBoldCmd(bold))
                             
-                            // Size
-                            val size = (style["size"] as? Number)?.toInt() ?: 0
+                            // Size (numeric byte or semantic string)
+                            val size = resolveSize(style["size"])
                             commands.add(getTextSizeCmd(size))
                             
                             // Adjust line spacing if size > 0 (height scaling)
@@ -401,8 +415,13 @@ class ThermalPrinterModule : Module() {
                                 commands.add(getTableCmd(header, columnWidths, columnAlignment, contentList, width, charset))
                             }
                         }
+                        "feed" -> {
+                            val n = (item["lines"] as? Number)?.toInt() ?: 1
+                            commands.add(getFeedLinesCmd(n))
+                        }
                         "divider" -> {
-                            val charToUse = item["charToUse"] as? String ?: "-"
+                            // Accept charToUse plus char/content aliases.
+                            val charToUse = (item["charToUse"] ?: item["char"] ?: item["content"]) as? String ?: "-"
                             val marginVertical = (item["marginVertical"] as? Number)?.toInt() ?: 0
                             
                             if (marginVertical > 0) {
@@ -416,16 +435,18 @@ class ThermalPrinterModule : Module() {
                             }
                         }
                         "two-columns" -> {
-                            val contentList = item["content"] as? List<String> ?: emptyList()
+                            // Accept canonical content:[l,r] plus left/right aliases.
+                            val contentList = item["content"] as? List<String>
+                                ?: listOfNotNull(item["left"] as? String, item["right"] as? String)
                             if (contentList.size >= 2) {
                                 val leftText = contentList[0]
                                 val rightText = contentList[1]
-                                
+
                                 // Apply styles
                                 val bold = style["bold"] as? Boolean ?: false
                                 commands.add(getBoldCmd(bold))
-                                
-                                val size = (style["size"] as? Number)?.toInt() ?: 0
+
+                                val size = resolveSize(style["size"])
                                 commands.add(getTextSizeCmd(size))
                                 
                                 val font = style["font"] as? String ?: "primary"
@@ -439,6 +460,9 @@ class ThermalPrinterModule : Module() {
                                 commands.add(getTextSizeCmd(0))
                                 commands.add(getFontCmd("primary"))
                             }
+                        }
+                        else -> {
+                            android.util.Log.w("ThermalPrinter", "Unknown item type: $type")
                         }
                     }
                     // Reset align to left
@@ -464,7 +488,7 @@ class ThermalPrinterModule : Module() {
                      }
                 })
             } catch (e: Exception) {
-                promise.reject("PRINT_ERROR", e.message, e)
+                promise.reject("PRINT_FAILED", e.message, e)
             }
         }
     }
@@ -505,14 +529,30 @@ fun getTableCmd(header: List<String>, columnWidths: List<Number>, columnAlignmen
     val numColumns = columnWidths.size
     val totalSpacing = if (numColumns > 1) numColumns - 1 else 0
     val availableChars = maxChars - totalSpacing
-    
-    // Calculate column widths in chars based on available space
-    val colChars = columnWidths.map { (it.toDouble() / 100.0 * availableChars).toInt() }.toMutableList()
-    
-    // Adjust last column to fill remaining space due to rounding
-    val currentTotal = colChars.sum()
-    if (currentTotal < availableChars && colChars.isNotEmpty()) {
-        colChars[colChars.lastIndex] += (availableChars - currentTotal)
+
+    // Disambiguate columnWidths:
+    //  - If the values sum to <= the paper's char width, treat them as ABSOLUTE
+    //    char counts (use as-is, then fit to the available space).
+    //  - Otherwise treat them as PERCENTAGES of the available width.
+    val requestedSum = columnWidths.sumOf { it.toInt() }
+    val colChars = if (requestedSum <= maxChars) {
+        columnWidths.map { it.toInt() }.toMutableList()
+    } else {
+        columnWidths.map { (it.toDouble() / 100.0 * availableChars).toInt() }.toMutableList()
+    }
+
+    // Shrink from the last columns if we overflow the available space.
+    var total = colChars.sum()
+    var idx = colChars.lastIndex
+    while (total > availableChars && idx >= 0) {
+        val reducible = minOf(colChars[idx], total - availableChars)
+        colChars[idx] -= reducible
+        total -= reducible
+        idx--
+    }
+    // Adjust last column to fill remaining space due to rounding/absolute slack.
+    if (total < availableChars && colChars.isNotEmpty()) {
+        colChars[colChars.lastIndex] += (availableChars - total)
     }
 
     // Helper to print a row
@@ -769,7 +809,7 @@ fun getCodePageCmd(encoding: String): ByteArray {
     // 2: PC850 (Multilingual)
     // 16: WPC1252
     // 255: Space Page (Empty)
-    val n = when(encoding.lowercase()) {
+    val n = when(normalizeEncoding(encoding)) {
         "pc850" -> 0x02
         "windows-1252" -> 0x10 // 16
         "iso-8859-1" -> 0x10 // 16 (Map to 1252)
@@ -777,4 +817,36 @@ fun getCodePageCmd(encoding: String): ByteArray {
         else -> 0x00 // Default to PC437 or printer default
     }
     return byteArrayOf(0x1B, 0x74, n.toByte())
+}
+
+/**
+ * Normalize encoding aliases to a canonical name before charset/code-page
+ * selection. Keeps iso8859_1, latin1, utf8, win1252, etc. from silently
+ * falling through to UTF-8.
+ */
+fun normalizeEncoding(encoding: String): String {
+    return when (val e = encoding.lowercase().trim()) {
+        "utf8" -> "utf-8"
+        "iso8859_1", "iso88591", "latin1" -> "iso-8859-1"
+        "win1252" -> "windows-1252"
+        else -> e
+    }
+}
+
+/**
+ * Resolve a text size from either a raw ESC/POS `GS ! n` byte (Number) or a
+ * semantic string. 'small'/'normal' -> 0, 'large' -> double height (0x01),
+ * 'xlarge' -> double height + width (0x11).
+ */
+fun resolveSize(value: Any?): Int {
+    return when (value) {
+        is Number -> value.toInt()
+        is String -> when (value.lowercase().trim()) {
+            "small", "normal" -> 0x00
+            "large" -> 0x01
+            "xlarge" -> 0x11
+            else -> value.toIntOrNull() ?: 0
+        }
+        else -> 0
+    }
 }

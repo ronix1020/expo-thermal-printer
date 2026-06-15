@@ -39,10 +39,40 @@ class PrinterUtils {
         return [0x1B, 0x64, lines]
     }
     
+    /// Normalize encoding aliases to a canonical name before charset/code-page
+    /// selection. Keeps iso8859_1, latin1, utf8, win1252, etc. from silently
+    /// falling through to UTF-8.
+    static func normalizeEncoding(_ encoding: String) -> String {
+        let e = encoding.lowercased().trimmingCharacters(in: .whitespaces)
+        switch e {
+        case "utf8": return "utf-8"
+        case "iso8859_1", "iso88591", "latin1": return "iso-8859-1"
+        case "win1252": return "windows-1252"
+        default: return e
+        }
+    }
+
+    /// Resolve a text size from either a raw ESC/POS `GS ! n` byte (number) or a
+    /// semantic string. 'small'/'normal' -> 0, 'large' -> double height (0x01),
+    /// 'xlarge' -> double height + width (0x11).
+    static func resolveSize(_ value: Any?) -> Int {
+        if let n = value as? NSNumber { return n.intValue }
+        if let n = value as? Int { return n }
+        if let s = value as? String {
+            switch s.lowercased().trimmingCharacters(in: .whitespaces) {
+            case "small", "normal": return 0x00
+            case "large": return 0x01
+            case "xlarge": return 0x11
+            default: return Int(s) ?? 0
+            }
+        }
+        return 0
+    }
+
     static func getCodePageCmd(_ encoding: String) -> [UInt8] {
         // ESC t n
         let n: UInt8
-        switch encoding.lowercased() {
+        switch normalizeEncoding(encoding) {
         case "pc850": n = 0x02
         case "windows-1252", "iso-8859-1": n = 0x10 // 16
         case "gbk": n = 0x00
@@ -52,7 +82,7 @@ class PrinterUtils {
     }
 
     static func resolveEncoding(_ encoding: String) -> String.Encoding {
-        switch encoding.lowercased() {
+        switch normalizeEncoding(encoding) {
         case "pc850":
             let cf = CFStringEncoding(CFStringEncodings.dosLatin1.rawValue)
             return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
@@ -63,7 +93,7 @@ class PrinterUtils {
         case "gbk":
             let cf = CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
             return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
-        case "utf-8", "utf8":
+        case "utf-8":
             return .utf8
         default:
             return .utf8
@@ -138,12 +168,30 @@ class PrinterUtils {
         let availableChars = maxChars - totalSpacing
         if availableChars <= 0 { return bytes }
 
-        var colChars: [Int] = columnWidths.map {
-            Int(floor($0.doubleValue / 100.0 * Double(availableChars)))
+        // Disambiguate columnWidths:
+        //  - If the values sum to <= the paper's char width, treat them as
+        //    ABSOLUTE char counts (use as-is, then fit to the available space).
+        //  - Otherwise treat them as PERCENTAGES of the available width.
+        let requestedSum = columnWidths.reduce(0) { $0 + $1.intValue }
+        var colChars: [Int]
+        if requestedSum <= maxChars {
+            colChars = columnWidths.map { $0.intValue }
+        } else {
+            colChars = columnWidths.map { Int(floor($0.doubleValue / 100.0 * Double(availableChars))) }
         }
-        let currentTotal = colChars.reduce(0, +)
-        if currentTotal < availableChars, let last = colChars.indices.last {
-            colChars[last] += (availableChars - currentTotal)
+
+        // Shrink from the last columns if we overflow the available space.
+        var total = colChars.reduce(0, +)
+        var idx = colChars.count - 1
+        while total > availableChars && idx >= 0 {
+            let reducible = min(colChars[idx], total - availableChars)
+            colChars[idx] -= reducible
+            total -= reducible
+            idx -= 1
+        }
+        // Adjust last column to fill remaining space due to rounding/absolute slack.
+        if total < availableChars, let last = colChars.indices.last {
+            colChars[last] += (availableChars - total)
         }
 
         func pad(_ text: String, width: Int, align: String) -> String {
@@ -264,18 +312,28 @@ class PrinterUtils {
         return bytes
     }
 
-    static func getTwoColumnsCmd(_ leftText: String, _ rightText: String, _ width: Int, _ encoding: String.Encoding) -> [UInt8] {
-         // Simple implementation: text + space + text
-         // Need to calculate spaces based on width (font A approx 32 chars for 58mm)
-         let maxChars = (width >= 80) ? 48 : 32
-         
+    static func getTwoColumnsCmd(_ leftText: String, _ rightText: String, _ width: Int, _ encoding: String.Encoding, _ size: Int, _ font: String) -> [UInt8] {
+         // Mirror the Android char-budget calculation so both platforms align
+         // the two columns identically.
+         // Base chars for Font A (12x24).
+         var maxChars = (width >= 80) ? 48 : ((width >= 58) ? 32 : 24)
+
+         // Font B (9x17) fits more characters per line.
+         if font == "secondary" {
+             maxChars = (width >= 80) ? 64 : ((width >= 58) ? 42 : 32)
+         }
+
+         // GS ! n: upper 4 bits are the width multiplier - 1.
+         let widthMultiplier = (size >> 4) + 1
+         maxChars /= widthMultiplier
+
          let leftLen = leftText.count
          let rightLen = rightText.count
-         
+
          if leftLen + rightLen >= maxChars {
              return stringToBytes(leftText + " " + rightText, encoding: encoding)
          }
-         
+
          let spaces = maxChars - leftLen - rightLen
          let spaceStr = String(repeating: " ", count: spaces)
          return stringToBytes(leftText + spaceStr + rightText, encoding: encoding)
