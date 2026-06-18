@@ -10,7 +10,9 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   private var scanPromise: Promise?
   private var connectPromise: Promise?
   private var writePromise: Promise?
-  
+  private var pendingChunks: [Data] = []
+  private var currentWriteType: CBCharacteristicWriteType = .withResponse
+
   override init() {
     super.init()
     centralManager = CBCentralManager(delegate: self, queue: nil)
@@ -43,40 +45,85 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         promise.reject("SERVICE_NOT_BOUND", "Not connected to any printer")
         return
     }
-    
-    writePromise = promise
-    
-    let type: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
-    
-    // Chunking might be needed for large data (MTU size), but CoreBluetooth often handles it or we can implement simple chunking.
-    // For now, let's try sending all. If it fails, we need to chunk.
-    let mtu = peripheral.maximumWriteValueLength(for: type)
-    if data.count > mtu {
-        // Simple chunking
-        var offset = 0
-        while offset < data.count {
-            let chunkLength = min(mtu, data.count - offset)
-            let chunk = data.subdata(in: offset..<offset + chunkLength)
-            peripheral.writeValue(chunk, for: characteristic, type: type)
-            offset += chunkLength
-        }
-    } else {
-        peripheral.writeValue(data, for: characteristic, type: type)
+
+    // Evitar solapar impresiones: una escritura previa puede seguir en vuelo (esperando un
+    // ACK o peripheralIsReady). Sobrescribir writePromise/pendingChunks colgaría la primera
+    // promesa y mezclaría los chunks de ambos payloads.
+    guard writePromise == nil else {
+        promise.reject("ALREADY_PRINTING", "A previous print is still in progress")
+        return
     }
-    
-    if type == .withoutResponse {
-        promise.resolve(nil)
+
+    writePromise = promise
+
+    // Preferir .withResponse cuando la característica lo soporta (entrega garantizada +
+    // control de flujo por ACK). Si solo soporta writeWithoutResponse, usar esa ruta con
+    // control de flujo explícito.
+    currentWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
+
+    // Partir el payload en chunks del tamaño máximo permitido por la MTU negociada.
+    let mtu = max(1, peripheral.maximumWriteValueLength(for: currentWriteType))
+    var chunks: [Data] = []
+    var offset = 0
+    while offset < data.count {
+        let len = min(mtu, data.count - offset)
+        chunks.append(data.subdata(in: offset..<offset + len))
+        offset += len
+    }
+    pendingChunks = chunks
+
+    sendPendingChunks()
+  }
+
+  // Envía los chunks pendientes respetando el control de flujo de CoreBluetooth.
+  private func sendPendingChunks() {
+    guard let peripheral = connectedPeripheral, let characteristic = writeCharacteristic else {
+        writePromise?.reject("SERVICE_NOT_BOUND", "Not connected to any printer")
         writePromise = nil
+        pendingChunks.removeAll()
+        return
+    }
+
+    if currentWriteType == .withoutResponse {
+        // writeWithoutResponse NO se encola: esperar a que el periférico pueda recibir más.
+        while !pendingChunks.isEmpty {
+            if !peripheral.canSendWriteWithoutResponse {
+                // Se reanuda en peripheralIsReady(toSendWriteWithoutResponse:)
+                return
+            }
+            let chunk = pendingChunks.removeFirst()
+            peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
+        }
+        writePromise?.resolve(nil)   // todos los chunks despachados
+        writePromise = nil
+    } else {
+        // .withResponse: enviar uno y esperar el ACK (didWriteValueFor) para el siguiente.
+        guard !pendingChunks.isEmpty else {
+            writePromise?.resolve(nil)
+            writePromise = nil
+            return
+        }
+        let chunk = pendingChunks.removeFirst()
+        peripheral.writeValue(chunk, for: characteristic, type: .withResponse)
     }
   }
   
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
      if let error = error {
          writePromise?.reject("PRINT_FAILED", error.localizedDescription)
-     } else {
-         writePromise?.resolve(nil)
+         writePromise = nil
+         pendingChunks.removeAll()
+         return
      }
-     writePromise = nil
+     // ACK de un chunk .withResponse: enviar el siguiente o resolver al terminar.
+     if currentWriteType == .withResponse {
+         if pendingChunks.isEmpty {
+             writePromise?.resolve(nil)
+             writePromise = nil
+         } else {
+             sendPendingChunks()
+         }
+     }
   }
 
   private func resolveScan() {
@@ -147,8 +194,20 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
   }
   
+  // Rechaza cualquier escritura en vuelo y limpia el estado para que la promesa de JS nunca
+  // quede colgada: tras una desconexión no llegarán ni el ACK (.withResponse) ni
+  // peripheralIsReady (.withoutResponse) que reanudarían sendPendingChunks().
+  private func failPendingWrite(_ reason: String) {
+    if writePromise != nil {
+        writePromise?.reject("PRINT_FAILED", reason)
+        writePromise = nil
+    }
+    pendingChunks.removeAll()
+  }
+
   func disconnect(_ promise: Promise) {
     if let peripheral = connectedPeripheral {
+      failPendingWrite("Disconnected during write")
       centralManager.cancelPeripheralConnection(peripheral)
       connectedPeripheral = nil
       promise.resolve()
@@ -171,11 +230,21 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   }
   
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+    // Si el enlace cae con una escritura en vuelo, rechazar la promesa pendiente en lugar de
+    // dejarla colgada para siempre (la impresión vieja truncaba; la nueva, sin esto, colgaría).
+    failPendingWrite(error?.localizedDescription ?? "Peripheral disconnected during write")
     connectedPeripheral = nil
   }
   
   // MARK: - CBPeripheralDelegate
-  
+
+  // CoreBluetooth avisa que el periférico vuelve a aceptar writeWithoutResponse.
+  func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+    if currentWriteType == .withoutResponse && !pendingChunks.isEmpty {
+        sendPendingChunks()
+    }
+  }
+
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     if let error = error {
         connectPromise?.reject("CONNECTION_FAILED", error.localizedDescription)
