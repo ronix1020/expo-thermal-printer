@@ -32,8 +32,22 @@ import java.io.ByteArrayOutputStream
 class ThermalPrinterModule : Module() {
     private var myBinder: IMyBinder? = null
     private var serviceConnection: ServiceConnection? = null
+    // Transporte activo ("bluetooth" | "usb" | null). Se usa para aplicar el
+    // retardo de drenado solo en Bluetooth (ver AsyncFunction("print")).
+    private var currentConnectionType: String? = null
     private val context: Context
         get() = appContext.reactContext ?: throw IllegalStateException("React Context is null")
+
+    companion object {
+        // El callback onsucess() de myBinder.write() confirma "entregado al buffer
+        // SPP", NO "recibido por la impresora". Si la app llama disconnect() justo
+        // después, el socket se cierra antes de drenar y un payload grande (raster
+        // del logo ~9KB) sale truncado. Esperamos ~ (bytes / DRAIN_BYTES_PER_MS) ms
+        // antes de resolver para dar tiempo a que el buffer SPP se vacíe.
+        // Constantes conservadoras y tuneables tras probar en la impresora real.
+        private const val DRAIN_BYTES_PER_MS = 2.5   // ~2.5 KB/s (BT SPP conservador)
+        private const val MAX_DRAIN_MS = 8000L
+    }
 
     // USB
     private val ACTION_USB_PERMISSION = "expo.modules.thermalprinter.USB_PERMISSION"
@@ -191,6 +205,7 @@ class ThermalPrinterModule : Module() {
 
             myBinder?.connectBtPort(macAddress, object : UiExecute {
                 override fun onsucess() { // Assuming method name based on typos common in these SDKs or standard naming
+                     currentConnectionType = "bluetooth"
                      promise.resolve(null)
                 }
                 override fun onfailed() {
@@ -250,6 +265,7 @@ class ThermalPrinterModule : Module() {
              }
              myBinder?.disconnectCurrentPort(object : UiExecute {
                  override fun onsucess() {
+                     currentConnectionType = null
                      promise.resolve(null)
                  }
                  override fun onfailed() {
@@ -481,7 +497,24 @@ class ThermalPrinterModule : Module() {
                 
                 myBinder?.write(finalData, object : UiExecute {
                      override fun onsucess() {
-                         promise.resolve(null)
+                         // onsucess() = bytes entregados al buffer SPP, no recibidos por
+                         // la impresora. En Bluetooth esperamos proporcional al tamaño
+                         // para que el buffer drene antes de un disconnect() de la app y
+                         // no se trunque el raster. USB drena distinto: resuelve directo.
+                         if (currentConnectionType == "usb") {
+                             promise.resolve(null)
+                             return
+                         }
+                         val drainMs = (finalData.size / DRAIN_BYTES_PER_MS)
+                             .toLong()
+                             .coerceIn(0L, MAX_DRAIN_MS)
+                         if (drainMs <= 0L) {
+                             promise.resolve(null)
+                         } else {
+                             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                 promise.resolve(null)
+                             }, drainMs)
+                         }
                      }
                      override fun onfailed() {
                          promise.reject("PRINT_FAILED", "Failed to send data", null)
@@ -497,6 +530,7 @@ class ThermalPrinterModule : Module() {
         try {
             myBinder?.connectUsbPort(context, device.deviceName, object : UiExecute {
                 override fun onsucess() {
+                    currentConnectionType = "usb"
                     promise?.resolve(device.deviceName)
                 }
 
@@ -702,40 +736,55 @@ fun scaleBitmap(bitmap: Bitmap, maxWidth: Int): Bitmap {
     return Bitmap.createScaledBitmap(bitmap, maxWidth, newHeight, true)
 }
 
+/**
+ * Convierte un bitmap a comandos ESC/POS usando el modo bit-image `ESC *`
+ * (0x1B 0x2A) en bandas de 24 puntos (modo 33, doble densidad).
+ *
+ * Antes se usaba el raster `GS v 0` (0x1D 0x76 0x30), pero muchas térmicas
+ * económicas NO implementan ese comando: el payload del raster caía como TEXTO
+ * (basura acentuada CP850) y desincronizaba el flujo -> avance de papel infinito.
+ * `ESC *` es el bit-image original, soportado por prácticamente todas las
+ * térmicas.
+ *
+ * La transparencia se aplana sobre BLANCO según el canal alfa: un PNG con fondo
+ * transparente antes salía como recuadro negro porque se ignoraba el alfa.
+ */
 fun bitmapToBytes(bitmap: Bitmap): ByteArray {
     val width = bitmap.width
     val height = bitmap.height
     val stream = ByteArrayOutputStream()
-    
-    // ESC/POS Raster Bit Image command: GS v 0 m xL xH yL yH d1...dk
-    stream.write(byteArrayOf(0x1D, 0x76, 0x30, 0x00))
-    
-    val bytesWidth = (width + 7) / 8
-    stream.write(bytesWidth % 256)
-    stream.write(bytesWidth / 256)
-    stream.write(height % 256)
-    stream.write(height / 256)
-    
-    for (y in 0 until height) {
-        for (x in 0 until bytesWidth) {
-            var byteVal = 0
-            for (b in 0 until 8) {
-                val px = x * 8 + b
-                if (px < width) {
-                    val pixel = bitmap.getPixel(px, y)
-                    // Check if pixel is dark (simple threshold)
-                    val r = (pixel shr 16) and 0xFF
-                    val g = (pixel shr 8) and 0xFF
-                    val b = pixel and 0xFF
-                    val brightness = (0.299 * r + 0.587 * g + 0.114 * b)
-                    if (brightness < 128) {
-                        byteVal = byteVal or (1 shl (7 - b))
+
+    stream.write(byteArrayOf(0x1B, 0x33, 24)) // interlineado 24 pts (bandas pegadas)
+
+    val nL = width % 256
+    val nH = width / 256
+    var y = 0
+    while (y < height) {
+        stream.write(byteArrayOf(0x1B, 0x2A, 33, nL.toByte(), nH.toByte())) // ESC * 33 nL nH
+        for (x in 0 until width) {
+            for (k in 0 until 3) {
+                var slice = 0
+                for (b in 0 until 8) {
+                    val yy = y + k * 8 + b
+                    if (yy < height) {
+                        val p = bitmap.getPixel(x, yy)
+                        val a = (p ushr 24) and 0xFF
+                        // Aplanar sobre blanco: transparente = blanco, no negro.
+                        val r = ((p ushr 16) and 0xFF) * a / 255 + (255 - a)
+                        val g = ((p ushr 8) and 0xFF) * a / 255 + (255 - a)
+                        val bl = (p and 0xFF) * a / 255 + (255 - a)
+                        if (0.299 * r + 0.587 * g + 0.114 * bl < 128) {
+                            slice = slice or (1 shl (7 - b))
+                        }
                     }
                 }
+                stream.write(slice)
             }
-            stream.write(byteVal)
         }
+        stream.write(0x0A) // imprime la banda y avanza 24 pts
+        y += 24
     }
+    stream.write(byteArrayOf(0x1B, 0x32)) // restaura interlineado por defecto
     return stream.toByteArray()
 }
 

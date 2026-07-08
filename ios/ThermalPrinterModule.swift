@@ -359,10 +359,13 @@ public class ThermalPrinterModule: Module {
               }
               
               if let img = image {
-                   // Max dots
+                   // Máximo de puntos del cabezal según el ancho de papel.
                    let printerMaxDots = (width >= 80) ? 576 : ((width >= 58) ? 384 : 288)
-                   
-                   let rasterBytes = PrinterUtils.bitmapToBytes(img, maxWidth: printerMaxDots)
+                   // Respetar el ancho pedido por la app (style.width), acotado al cabezal.
+                   let styleWidth = (style["width"] as? NSNumber)?.intValue
+                   let target = min(styleWidth ?? printerMaxDots, printerMaxDots)
+
+                   let rasterBytes = PrinterUtils.bitmapToBytes(img, maxWidth: target)
                    bytes.append(contentsOf: rasterBytes)
                    bytes.append(0x0A)
               }

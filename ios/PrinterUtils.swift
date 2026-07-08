@@ -251,64 +251,78 @@ class PrinterUtils {
         return bytes
     }
 
-        static func bitmapToBytes(_ image: UIImage, maxWidth: Int) -> [UInt8] {
-        var finalImage = image
-        let width = Int(image.size.width)
-        _ = Int(image.size.height)
-        
-        if width > maxWidth {
-             let ratio = CGFloat(maxWidth) / image.size.width
-             let newHeight = image.size.height * ratio
-             UIGraphicsBeginImageContext(CGSize(width: CGFloat(maxWidth), height: newHeight))
-             image.draw(in: CGRect(x: 0, y: 0, width: CGFloat(maxWidth), height: newHeight))
-             finalImage = UIGraphicsGetImageFromCurrentImageContext() ?? image
-             UIGraphicsEndImageContext()
-        }
-        
-        guard let cgImage = finalImage.cgImage else { return [] }
-        let scaledWidth = cgImage.width
-        let scaledHeight = cgImage.height
-        
-        var bytes: [UInt8] = []
-        // ESC/POS Raster Bit Image command: GS v 0 m xL xH yL yH d1...dk
-        bytes.append(contentsOf: [0x1D, 0x76, 0x30, 0x00])
-        
-        let bytesWidth = (scaledWidth + 7) / 8
-        bytes.append(UInt8(bytesWidth % 256))
-        bytes.append(UInt8(bytesWidth / 256))
-        bytes.append(UInt8(scaledHeight % 256))
-        bytes.append(UInt8(scaledHeight / 256))
-        
-        // Pixel data access
-        guard let data = cgImage.dataProvider?.data,
-              let ptr = CFDataGetBytePtr(data) else { return [] }
-            
-        let bytesPerPixel = cgImage.bitsPerPixel / 8
-        let bytesPerRow = cgImage.bytesPerRow
-        
-        for y in 0..<scaledHeight {
-            for x in 0..<bytesWidth {
-                var byteVal: UInt8 = 0
-                for b in 0..<8 {
-                    let px = x * 8 + b
-                    if px < scaledWidth {
-                        let offset = y * bytesPerRow + px * bytesPerPixel
-                        // Assume RGBA or similar. Simple luminance check.
-                        // Swift's memory layout for pixels is usually R G B A
-                        let r = ptr[offset]
-                        let g = ptr[offset+1]
-                        let bVal = ptr[offset+2]
-                        // let a = ptr[offset+3] // Ignore alpha for now, assume white background
-                       
-                        let brightness = (0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(bVal))
-                        if brightness < 128 {
-                             byteVal |= (1 << (7 - b))
+    /// Convierte una imagen a comandos ESC/POS usando el modo bit-image `ESC *`
+    /// (0x1B 0x2A) en bandas de 24 puntos (modo 33, doble densidad).
+    ///
+    /// Antes se usaba el raster `GS v 0` (0x1D 0x76 0x30), pero muchas térmicas
+    /// económicas NO lo implementan: el payload caía como texto (basura) y
+    /// desincronizaba el flujo. `ESC *` es el bit-image original, soportado por
+    /// prácticamente todas las térmicas.
+    ///
+    /// La imagen se re-renderiza en un contexto de ESCALA DE GRISES de formato
+    /// conocido, con fondo blanco y escala 1:1. Esto corrige de una vez:
+    ///  - el resize a escala del dispositivo (2x/3x) del antiguo
+    ///    `UIGraphicsBeginImageContext`, que hacía el raster 2-3x más ancho que el
+    ///    cabezal;
+    ///  - la transparencia (se aplana sobre blanco; ya no sale recuadro negro),
+    ///    en TODOS los casos y no solo cuando había que redimensionar;
+    ///  - la ambigüedad de orden de canales (BGRA/ARGB premultiplicado) del
+    ///    cgImage origen, que podía invertir los colores.
+    static func bitmapToBytes(_ image: UIImage, maxWidth: Int) -> [UInt8] {
+        guard let srcCg = image.cgImage else { return [] }
+        let srcW = srcCg.width
+        let srcH = srcCg.height
+        if srcW == 0 || srcH == 0 { return [] }
+
+        // Escalar solo hacia abajo, respetando el ancho pedido (nunca ampliar).
+        let targetW = min(srcW, max(1, maxWidth))
+        let targetH = max(1, Int((Double(srcH) * Double(targetW) / Double(srcW)).rounded()))
+
+        // Contexto en escala de grises: 1 byte por píxel = luminancia directa,
+        // fondo blanco, escala 1:1. bytesPerRow 0 -> Core Graphics calcula el
+        // stride óptimo (puede padear cada fila, por eso se lee ctx.bytesPerRow).
+        guard let ctx = CGContext(
+            data: nil,
+            width: targetW,
+            height: targetH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return [] }
+
+        ctx.setFillColor(gray: 1.0, alpha: 1.0) // blanco
+        ctx.fill(CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        ctx.interpolationQuality = .high
+        ctx.draw(srcCg, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+
+        guard let buffer = ctx.data else { return [] }
+        let bpr = ctx.bytesPerRow
+        let ptr = buffer.bindMemory(to: UInt8.self, capacity: bpr * targetH)
+
+        let width = targetW
+        let height = targetH
+        var bytes: [UInt8] = [0x1B, 0x33, 24] // interlineado 24 pts (bandas pegadas)
+        let nL = UInt8(width % 256), nH = UInt8(width / 256)
+        var y = 0
+        while y < height {
+            bytes.append(contentsOf: [0x1B, 0x2A, 33, nL, nH]) // ESC * 33 nL nH
+            for x in 0..<width {
+                for k in 0..<3 {
+                    var slice: UInt8 = 0
+                    for b in 0..<8 {
+                        let yy = y + k * 8 + b
+                        if yy < height && Int(ptr[yy * bpr + x]) < 128 {
+                            slice |= (1 << (7 - b))
                         }
                     }
+                    bytes.append(slice)
                 }
-                bytes.append(byteVal)
             }
+            bytes.append(0x0A) // imprime la banda y avanza 24 pts
+            y += 24
         }
+        bytes.append(contentsOf: [0x1B, 0x32]) // restaura interlineado
         return bytes
     }
 
