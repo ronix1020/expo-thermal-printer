@@ -121,6 +121,7 @@ class ThermalPrinterModule : Module() {
                 }
                 override fun onServiceDisconnected(name: ComponentName?) {
                     myBinder = null
+                    currentConnectionType = null
                 }
             }
             context.bindService(intent, serviceConnection!!, Context.BIND_AUTO_CREATE)
@@ -259,7 +260,12 @@ class ThermalPrinterModule : Module() {
         }
 
         AsyncFunction("disconnect") { promise: Promise ->
-             if (myBinder == null) {
+             // Nada que desconectar si el servicio no está ligado o si nunca se abrió un puerto.
+             // disconnectCurrentPort() hace xPrinterDev.Close() SIN null-check y la NPE ocurre en el
+             // hilo de fondo del AsyncTask → crash duro. currentConnectionType solo es != null tras un
+             // connect exitoso: es el gate seguro.
+             if (myBinder == null || currentConnectionType == null) {
+                 currentConnectionType = null
                  promise.resolve(null)
                  return@AsyncFunction
              }
