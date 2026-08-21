@@ -173,9 +173,11 @@ await ThermalPrinter.disconnect();
 - **`disconnect(): Promise<void>`**
   Cierra la conexión actual.
 - **`isConnected(): Promise<boolean>`**
-  Verifica si una impresora está conectada actualmente.
+  Verifica si una impresora está conectada actualmente. Devuelve `false` si el
+  servicio aún no está ligado o no hay una conexión activa; no queda pendiente.
 - **`print(items: PrinterItem[], options?: PrintOptions): Promise<void>`**
-  Envía datos a la impresora.
+  Envía datos a la impresora. Rechaza con `NOT_CONNECTED` si se invoca antes de
+  `connect()` o `connectUsb()`.
 
 ### Tipos
 
@@ -244,6 +246,7 @@ Opcional: `marginVertical` (líneas en blanco antes y después).
 | `DEVICE_NOT_FOUND` | El dispositivo solicitado no se encontró (no emparejado / fuera del escaneo). |
 | `CONNECTION_FAILED` | Falló el intento de conexión o el descubrimiento de servicios. |
 | `SERVICE_NOT_BOUND` | El servicio/transporte de impresión aún no está disponible (sin conexión activa). |
+| `NOT_CONNECTED` | No hay una conexión de impresora activa; llama a `connect()` o `connectUsb()` antes de imprimir. |
 | `PRINT_FAILED` | Falló el envío de datos a la impresora (p. ej. impresora apagada a mitad). |
 
 ## Licencia

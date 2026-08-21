@@ -20,6 +20,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.app.PendingIntent
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -118,6 +119,10 @@ class ThermalPrinterModule : Module() {
             serviceConnection = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                     myBinder = service as? IMyBinder
+                    // Bind recién hecho: el servicio arranca con xPrinterDev == null (onCreate() no lo
+                    // inicializa), así que nunca hay puerto abierto. Limpiar evita que un valor viejo
+                    // deje pasar los gates de print()/isConnected() tras recrearse el servicio.
+                    currentConnectionType = null
                 }
                 override fun onServiceDisconnected(name: ComponentName?) {
                     myBinder = null
@@ -131,6 +136,7 @@ class ThermalPrinterModule : Module() {
             serviceConnection?.let {
                 context.unbindService(it)
             }
+            currentConnectionType = null
         }
 
         AsyncFunction("scanDevices") { type: String, promise: Promise ->
@@ -171,7 +177,11 @@ class ThermalPrinterModule : Module() {
             
             val filter = IntentFilter(BluetoothDevice.ACTION_FOUND)
             filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
-            context.registerReceiver(bluetoothReceiver, filter)
+            // API 34+ exige declarar la exportación del receiver o lanza SecurityException.
+            // Solo escuchamos broadcasts del sistema para este proceso → NOT_EXPORTED.
+            ContextCompat.registerReceiver(
+                context, bluetoothReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+            )
             
             if (ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
                  bluetoothAdapter.startDiscovery()
@@ -252,7 +262,11 @@ class ThermalPrinterModule : Module() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT else PendingIntent.FLAG_UPDATE_CURRENT
                 )
                 val filter = IntentFilter(ACTION_USB_PERMISSION)
-                context.registerReceiver(usbReceiver, filter)
+                // API 34+ exige declarar la exportación del receiver o lanza SecurityException.
+                // El PendingIntent es auto-dirigido (mismo proceso) → NOT_EXPORTED.
+                ContextCompat.registerReceiver(
+                    context, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+                )
                 usbManager.requestPermission(printerDevice, permissionIntent)
             } else {
                 connectToUsbDevice(printerDevice, promise)
@@ -281,10 +295,17 @@ class ThermalPrinterModule : Module() {
         }
 
         AsyncFunction("isConnected") { promise: Promise ->
-             // Implementation depends on SDK checking method, user mentioned checkLinkedState
-             // checkLinkedState(UiExecute var1)
-             // This might be async too.
-             myBinder?.checkLinkedState(object: UiExecute {
+             // checkLinkedState() -> MyBinder$8.doinbackground() hace xPrinterDev.GetPortInfo() SIN
+             // null-check, y PosAsynncTask no tiene try/catch: la NPE revienta en el hilo de fondo del
+             // AsyncTask y NO es atrapable desde Kotlin ni desde JS. Sin conexión real respondemos
+             // false en vez de crashear; y resolvemos SIEMPRE (antes, con myBinder null, el safe-call
+             // `?.` dejaba la promesa colgada para siempre del lado JS).
+             val binder = myBinder
+             if (binder == null || currentConnectionType == null) {
+                 promise.resolve(false)
+                 return@AsyncFunction
+             }
+             binder.checkLinkedState(object : UiExecute {
                  override fun onsucess() {
                      promise.resolve(true)
                  }
@@ -295,8 +316,11 @@ class ThermalPrinterModule : Module() {
         }
 
         AsyncFunction("print") { items: List<Map<String, Any>>, width: Int, encoding: String, lineSpacing: Int, feedLines: Int, promise: Promise ->
-            if (myBinder == null) {
-                promise.reject("SERVICE_NOT_BOUND", "Service not bound", null)
+            // write() -> MyBinder$5.doinbackground() -> xPrinterDev.Write(data) SIN null-check, y
+            // PosAsynncTask no tiene try/catch: la NPE revienta en el hilo de fondo y NO es atrapable.
+            // myBinder NO sirve de gate (BIND_AUTO_CREATE lo deja no-null sin conexión); currentConnectionType sí.
+            if (myBinder == null || currentConnectionType == null) {
+                promise.reject("NOT_CONNECTED", "Printer is not connected. Call connect() first.", null)
                 return@AsyncFunction
             }
 
