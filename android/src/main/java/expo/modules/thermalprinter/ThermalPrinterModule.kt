@@ -524,9 +524,12 @@ class ThermalPrinterModule : Module() {
                 }
                 
                 val finalData = concatByteArrays(commands)
-                
+                logTxDump(finalData, width, encoding, currentConnectionType)
+                val txStartedAt = android.os.SystemClock.elapsedRealtime()
+
                 myBinder?.write(finalData, object : UiExecute {
                      override fun onsucess() {
+                         logTx("write onsucess tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
                          // onsucess() = bytes entregados al buffer SPP, no recibidos por
                          // la impresora. En Bluetooth esperamos proporcional al tamaño
                          // para que el buffer drene antes de un disconnect() de la app y
@@ -547,6 +550,7 @@ class ThermalPrinterModule : Module() {
                          }
                      }
                      override fun onfailed() {
+                         logTx("write onfailed tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
                          promise.reject("PRINT_FAILED", "Failed to send data", null)
                      }
                 })
@@ -575,6 +579,51 @@ class ThermalPrinterModule : Module() {
 }
 
 // Helper Functions
+
+private const val LOG_TAG = "ThermalPrinter"
+
+/**
+ * Diagnóstico: volcado hex del payload EXACTO que se entrega al SDK en `print()`.
+ *
+ * Apagado por defecto (un ticket lleva datos del cliente y no debe caer en logcat
+ * en un build normal). Se activa en el dispositivo, sin recompilar ni cambiar la
+ * API, con el gate estándar de Android:
+ *
+ *     adb shell setprop log.tag.ThermalPrinter VERBOSE
+ *     adb logcat -s ThermalPrinter
+ *
+ * Imprime cabecera (tamaño, CRC32, ancho, encoding, transporte) y líneas de 32
+ * bytes con offset, hex y columna ASCII, para comparar byte a byte lo que sale
+ * en distintas versiones de la app.
+ */
+fun logTxDump(data: ByteArray, width: Int, encoding: String, transport: String?) {
+    if (!android.util.Log.isLoggable(LOG_TAG, android.util.Log.VERBOSE)) return
+    val crc = java.util.zip.CRC32().apply { update(data) }.value
+    android.util.Log.v(
+        LOG_TAG,
+        "TX ${data.size} bytes crc32=%08x width=$width encoding=$encoding transport=$transport".format(crc)
+    )
+    val perLine = 32
+    var offset = 0
+    while (offset < data.size) {
+        val end = minOf(offset + perLine, data.size)
+        val hex = StringBuilder(perLine * 3)
+        val ascii = StringBuilder(perLine)
+        for (i in offset until end) {
+            val b = data[i].toInt() and 0xFF
+            hex.append("%02X ".format(b))
+            ascii.append(if (b in 0x20..0x7E) b.toChar() else '.')
+        }
+        android.util.Log.v(LOG_TAG, "%06X  %-96s |%s|".format(offset, hex.toString(), ascii.toString()))
+        offset = end
+    }
+}
+
+/** Traza corta bajo el mismo gate que [logTxDump] (resultado y tiempos del write). */
+fun logTx(message: String) {
+    if (!android.util.Log.isLoggable(LOG_TAG, android.util.Log.VERBOSE)) return
+    android.util.Log.v(LOG_TAG, message)
+}
 
 fun getTableCmd(header: List<String>, columnWidths: List<Number>, columnAlignment: List<String>, content: List<List<String>>, printerWidth: Int, charset: java.nio.charset.Charset): ByteArray {
     val stream = ByteArrayOutputStream()

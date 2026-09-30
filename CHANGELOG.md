@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.4
+
+- Android: volcado hex de diagnóstico del payload que `print()` entrega al SDK,
+  con CRC32, transporte y tiempos del `write`. Apagado por defecto; se activa en
+  el dispositivo con `adb shell setprop log.tag.ThermalPrinter VERBOSE` y se lee
+  con `adb logcat -s ThermalPrinter`. No cambia la API.
+
 ## 1.5.3
 
 - Android: `print()` e `isConnected()` ahora verifican una conexión real antes

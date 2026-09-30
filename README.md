@@ -236,6 +236,20 @@ Opcional: `marginVertical` (líneas en blanco antes y después).
 - `feedLines`: `number` (por defecto: 0)
 - `unaccent`: `boolean` — si es `true`, elimina acentos/diacríticos en JS antes de enviar (útil con codificaciones limitadas).
 
+### Diagnóstico: volcado hex del payload (Android)
+
+Para ver los bytes exactos que `print()` entrega al SDK (cabecera con tamaño,
+CRC32, ancho, encoding y transporte, más líneas de 32 bytes con hex y ASCII),
+activa el log en el dispositivo y léelo con logcat. No requiere recompilar ni
+cambia la API; apagado por defecto para no exponer datos del ticket.
+
+```bash
+adb shell setprop log.tag.ThermalPrinter VERBOSE
+adb logcat -s ThermalPrinter
+# para apagarlo:
+adb shell setprop log.tag.ThermalPrinter ""
+```
+
 ### Códigos de Error
 
 `connect()`, `print()` y demás métodos rechazan con códigos estables e idénticos en iOS y Android. Los mensajes están en inglés (cortos) para que el consumidor los traduzca:
