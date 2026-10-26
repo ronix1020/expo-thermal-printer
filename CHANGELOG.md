@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.7.0
+
+- Android: se elimina el SDK propietario de XPrinter (`posprinterconnectandsendsdk.jar`).
+  Ya no hay que copiarlo a `android/libs` ni mantener el `postinstall` que lo hacía;
+  las apps pueden quitarlo, junto con cualquier regla ProGuard de `PosprinterService`.
+- Android: transporte propio. Bluetooth con un `BluetoothSocket` SPP; USB con
+  `UsbManager` y `bulkTransfer`. Cualquier impresora USB con interfaz de impresora
+  o endpoint bulk OUT conecta: el SDK solo aceptaba 8 fabricantes.
+- Android: los errores de conexión y envío llegan a la promesa con el mensaje del
+  sistema, y no hay más `NullPointerException` no atrapables en hilos del SDK. Si un
+  envío falla, se cierra la conexión e `isConnected()` devuelve `false`.
+- Android: en USB, `onPrintProgress` es real (por bloque de `bulkTransfer`). En
+  Bluetooth sigue la espera estimada: `write()` vuelve en cuanto el stack de Android
+  tiene los bytes en buffer, igual que con el SDK.
+- `disconnect()` ya no rechaza con `DISCONNECT_FAILED`; siempre resuelve.
+- La API JS no cambia.
+
 ## 1.6.0
 
 - Nuevo encoding opt-in `userfont` (Android e iOS) para impresoras con la fuente

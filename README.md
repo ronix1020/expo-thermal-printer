@@ -19,22 +19,6 @@ Si deseas instalar la última versión directamente desde el repositorio:
 npm install git+https://github.com/ronix1020/expo-thermal-printer.git
 ```
 
-### ⚠️ Importante: Requisito de SDK Propietario
-
-Esta librería depende de un SDK propietario (`posprinterconnectandsendsdk.jar`) que no puede ser distribuido vía NPM ni GitHub debido a restricciones de licencia. Debes obtener este archivo y añadirlo a tu proyecto manualmente.
-
-1. **Descarga** el archivo `posprinterconnectandsendsdk.jar` (usualmente proporcionado por el fabricante de tu impresora).
-2. **Colócalo** en una carpeta segura de tu proyecto (ej. `assets/libs/`).
-
-**Automatización Recomendada (Script Postinstall):**
-Para asegurar que el archivo se copie correctamente a la librería cada vez que instales dependencias (especialmente útil si instalas desde GitHub donde la carpeta `libs` no existe), añade este script a tu `package.json`:
-
-```json
-"scripts": {
-  "postinstall": "mkdir -p node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs && cp ./assets/libs/posprinterconnectandsendsdk.jar node_modules/@ronix1020/react-native-ultimate-thermal-printer/android/libs/"
-}
-```
-
 ## Configuración
 
 ### Permisos de Android
@@ -179,8 +163,8 @@ await ThermalPrinter.disconnect();
   Envía datos a la impresora. Rechaza con `NOT_CONNECTED` si se invoca antes de
   `connect()` o `connectUsb()`.
 - **`addPrintProgressListener(listener: (e: { sent: number; total: number }) => void): { remove(): void }`**
-  Avance en bytes de `print()`. En iOS cuenta los bytes confirmados por BLE; en
-  Android/Bluetooth es un estimado a ~2.5 KB/s (el SDK no informa avance real) y
+  Avance en bytes de `print()`. En iOS cuenta los bytes confirmados por BLE y en
+  Android/USB los transferidos por `bulkTransfer`; en Android/Bluetooth es un estimado a ~2.5 KB/s (Android no informa cuánto recibió la impresora) y
   `print()` resuelve cuando el estimado llega al 100%. Llama `remove()` al terminar.
 
 ### Tipos

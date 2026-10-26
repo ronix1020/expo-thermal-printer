@@ -23,13 +23,4 @@ android {
 dependencies {
     implementation project(':expo-modules-core')
     implementation "org.jetbrains.kotlin:kotlin-stdlib"
-    
-    // Include the SDK JAR if it exists
-    def sdkJar = file('libs/posprinterconnectandsendsdk.jar')
-    if (sdkJar.exists()) {
-        compileOnly files(sdkJar)
-        implementation files(sdkJar)
-    } else {
-        logger.warn("ThermalPrinter: 'posprinterconnectandsendsdk.jar' not found in module libs. Ensure it is provided manually if needed.")
-    }
 }
