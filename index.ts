@@ -27,7 +27,9 @@ export type PrinterEncoding =
   | 'cp1258'
   | 'windows-1252' | 'win1252'
   | 'iso-8859-1' | 'iso8859_1' | 'iso88591' | 'latin1'
-  | 'pc850';
+  | 'pc850'
+  | 'userfont'
+  | 'raster';
 export type PrinterAlign = 'left' | 'center' | 'right';
 export type PrinterFont = 'primary' | 'secondary';
 
@@ -193,6 +195,19 @@ export async function print(
     options.lineSpacing || 30,
     options.feedLines || 0
   );
+}
+
+/** Bytes enviados de la impresión en curso. En Android/Bluetooth es un estimado (~2.5 KB/s). */
+export interface PrintProgress {
+  sent: number;
+  total: number;
+}
+
+/** Escucha el avance de `print()`. Llamar `remove()` al terminar. */
+export function addPrintProgressListener(
+  listener: (event: PrintProgress) => void
+): { remove(): void } {
+  return ThermalPrinterModule.addListener("onPrintProgress", listener);
 }
 
 export async function isConnected(): Promise<boolean> {

@@ -12,6 +12,20 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   private var writePromise: Promise?
   private var pendingChunks: [Data] = []
   private var currentWriteType: CBCharacteristicWriteType = .withResponse
+  // Progreso del envío en bytes; se avisa solo cuando cambia el porcentaje.
+  var onProgress: ((Int, Int) -> Void)?
+  private var totalBytes = 0
+  private var sentBytes = 0
+  private var lastPercent = -1
+
+  private func reportProgress(_ bytes: Int) {
+    sentBytes += bytes
+    let percent = totalBytes > 0 ? sentBytes * 100 / totalBytes : 100
+    if percent != lastPercent {
+      lastPercent = percent
+      onProgress?(sentBytes, totalBytes)
+    }
+  }
 
   override init() {
     super.init()
@@ -20,7 +34,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func scanDevices(_ promise: Promise) {
     if centralManager.state != .poweredOn {
-      promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not powered on")
+      promise.reject(PrinterException("BLUETOOTH_NOT_READY", "Bluetooth is not powered on"))
       return
     }
     
@@ -42,7 +56,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func write(_ data: Data, _ promise: Promise) {
     guard let peripheral = connectedPeripheral, let characteristic = writeCharacteristic else {
-        promise.reject("SERVICE_NOT_BOUND", "Not connected to any printer")
+        promise.reject(PrinterException("SERVICE_NOT_BOUND", "Not connected to any printer"))
         return
     }
 
@@ -50,7 +64,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     // ACK o peripheralIsReady). Sobrescribir writePromise/pendingChunks colgaría la primera
     // promesa y mezclaría los chunks de ambos payloads.
     guard writePromise == nil else {
-        promise.reject("ALREADY_PRINTING", "A previous print is still in progress")
+        promise.reject(PrinterException("ALREADY_PRINTING", "A previous print is still in progress"))
         return
     }
 
@@ -71,6 +85,9 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         offset += len
     }
     pendingChunks = chunks
+    totalBytes = data.count
+    sentBytes = 0
+    lastPercent = -1
 
     sendPendingChunks()
   }
@@ -78,7 +95,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   // Envía los chunks pendientes respetando el control de flujo de CoreBluetooth.
   private func sendPendingChunks() {
     guard let peripheral = connectedPeripheral, let characteristic = writeCharacteristic else {
-        writePromise?.reject("SERVICE_NOT_BOUND", "Not connected to any printer")
+        writePromise?.reject(PrinterException("SERVICE_NOT_BOUND", "Not connected to any printer"))
         writePromise = nil
         pendingChunks.removeAll()
         return
@@ -93,6 +110,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             let chunk = pendingChunks.removeFirst()
             peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
+            reportProgress(chunk.count)
         }
         writePromise?.resolve(nil)   // todos los chunks despachados
         writePromise = nil
@@ -104,19 +122,25 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             return
         }
         let chunk = pendingChunks.removeFirst()
+        inFlightBytes = chunk.count
         peripheral.writeValue(chunk, for: characteristic, type: .withResponse)
     }
   }
+
+  // Bytes del chunk .withResponse que espera su ACK; cuenta como enviado al llegar el ACK.
+  private var inFlightBytes = 0
   
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
      if let error = error {
-         writePromise?.reject("PRINT_FAILED", error.localizedDescription)
+         writePromise?.reject(PrinterException("PRINT_FAILED", error.localizedDescription))
          writePromise = nil
          pendingChunks.removeAll()
          return
      }
      // ACK de un chunk .withResponse: enviar el siguiente o resolver al terminar.
      if currentWriteType == .withResponse {
+         reportProgress(inFlightBytes)
+         inFlightBytes = 0
          if pendingChunks.isEmpty {
              writePromise?.resolve(nil)
              writePromise = nil
@@ -176,7 +200,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     switch centralManager.state {
     case .poweredOn:
       guard let peripheral = discoveredPeripherals.first(where: { $0.identifier.uuidString == uuid }) else {
-        promise.reject("DEVICE_NOT_FOUND", "Device with UUID \(uuid) not found in scan results")
+        promise.reject(PrinterException("DEVICE_NOT_FOUND", "Device with UUID \(uuid) not found in scan results"))
         return
       }
       connectPromise = promise
@@ -187,10 +211,10 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
           self.attemptConnect(uuid, promise, retriesLeft: retriesLeft - 1)
         }
       } else {
-        promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not ready")
+        promise.reject(PrinterException("BLUETOOTH_NOT_READY", "Bluetooth is not ready"))
       }
     default:
-      promise.reject("BLUETOOTH_NOT_READY", "Bluetooth is not powered on")
+      promise.reject(PrinterException("BLUETOOTH_NOT_READY", "Bluetooth is not powered on"))
     }
   }
   
@@ -199,7 +223,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   // peripheralIsReady (.withoutResponse) que reanudarían sendPendingChunks().
   private func failPendingWrite(_ reason: String) {
     if writePromise != nil {
-        writePromise?.reject("PRINT_FAILED", reason)
+        writePromise?.reject(PrinterException("PRINT_FAILED", reason))
         writePromise = nil
     }
     pendingChunks.removeAll()
@@ -225,7 +249,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   }
   
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-    connectPromise?.reject("CONNECTION_FAILED", error?.localizedDescription ?? "Unknown error")
+    connectPromise?.reject(PrinterException("CONNECTION_FAILED", error?.localizedDescription ?? "Unknown error"))
     connectPromise = nil
   }
   
@@ -247,7 +271,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     if let error = error {
-        connectPromise?.reject("CONNECTION_FAILED", error.localizedDescription)
+        connectPromise?.reject(PrinterException("CONNECTION_FAILED", error.localizedDescription))
         connectPromise = nil
         return
     }
@@ -281,6 +305,15 @@ public class ThermalPrinterModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ThermalPrinter")
 
+    // { sent, total } en bytes mientras se envía (ACKs reales de BLE).
+    Events("onPrintProgress")
+
+    OnCreate {
+      self.bluetoothManager.onProgress = { [weak self] sent, total in
+        self?.sendEvent("onPrintProgress", ["sent": sent, "total": total])
+      }
+    }
+
     AsyncFunction("scanDevices") { (type: String, promise: Promise) in
       bluetoothManager.scanDevices(promise)
     }
@@ -298,21 +331,80 @@ public class ThermalPrinterModule: Module {
 
       let resolvedEncoding = PrinterUtils.resolveEncoding(encoding)
 
+      // userfont: impresoras con la fuente ROM vacía (p.ej. SAT AF330 que solo dibuja # $ @ [ \ ] ^ ` { | } ~).
+      // Se descarga una fuente propia con ESC & y los caracteres no-ASCII se reasignan a slots libres.
+      let userFont = PrinterUtils.normalizeEncoding(encoding) == "userfont"
+      let userFontMap = userFont ? PrinterUtils.buildUserFontMap(items) : [:]
+      let printItems = userFont ? items.map { PrinterUtils.remapUserFontItem($0, userFontMap) } : items
+
+      // raster: el texto se dibuja como imagen (ESC *); no depende de fuentes ni encodings de la impresora.
+      let raster = PrinterUtils.normalizeEncoding(encoding) == "raster" ? RasterText(printerWidth: width, lineSpacing: lineSpacing) : nil
+
       // Initialize Printer
       bytes.append(contentsOf: [0x1B, 0x40])
+
+      // La AF330 traía el área de impresión en 384 puntos con papel de 80 mm (cortaba a 32 columnas).
+      if userFont || raster != nil { bytes.append(contentsOf: PrinterUtils.getPrintAreaCmd(width)) }
 
       // Set Code Page
       bytes.append(contentsOf: PrinterUtils.getCodePageCmd(encoding))
 
+      if userFont { bytes.append(contentsOf: PrinterUtils.getUserFontCmd(userFontMap)) }
+
       // Set Line Spacing
       bytes.append(contentsOf: PrinterUtils.getLineSpacingCmd(lineSpacing))
-      
-      for item in items {
+
+      for item in printItems {
           let type = item["type"] as? String ?? "text"
           let content = item["content"] as? String ?? ""
           let style = item["style"] as? [String: Any] ?? [:]
-          
+
           let align = style["align"] as? String ?? "left"
+
+          // Raster: se reusa el acomodo en columnas de los helpers de texto y se dibuja; QR e imagen siguen nativos.
+          if let raster = raster {
+              let bold = style["bold"] as? Bool ?? false
+              let size = PrinterUtils.resolveSize(style["size"])
+              switch type {
+              case "text":
+                  raster.addText(content, bold: bold, size: size, align: align)
+                  continue
+              case "table":
+                  let header = item["tableHeader"] as? [String] ?? []
+                  let columnWidths = item["columnWidths"] as? [NSNumber] ?? []
+                  let columnAlignment = item["columnAlignment"] as? [String] ?? []
+                  let contentList = item["content"] as? [[String]] ?? []
+                  if !columnWidths.isEmpty {
+                      let table = PrinterUtils.getTableCmd(header: header, columnWidths: columnWidths, columnAlignment: columnAlignment,
+                                                           content: contentList, printerWidth: width, encoding: .utf8)
+                      var text = String(decoding: table, as: UTF8.self)
+                      if text.hasSuffix("\n") { text.removeLast() }
+                      raster.addText(text, bold: false, size: 0, align: "left")
+                  }
+                  continue
+              case "divider":
+                  let charToUse = (item["charToUse"] as? String) ?? (item["char"] as? String) ?? (item["content"] as? String) ?? "-"
+                  let marginVertical = (item["marginVertical"] as? NSNumber)?.intValue ?? 0
+                  let maxChars = (width >= 80) ? 48 : ((width >= 58) ? 32 : 24)
+                  raster.addFeed(marginVertical)
+                  raster.addText(String(repeating: String(charToUse.prefix(1)), count: maxChars), bold: false, size: 0, align: "left")
+                  raster.addFeed(marginVertical)
+                  continue
+              case "two-columns":
+                  let contentList = (item["content"] as? [String]) ?? [item["left"] as? String, item["right"] as? String].compactMap { $0 }
+                  if contentList.count >= 2 {
+                      let line = PrinterUtils.getTwoColumnsCmd(contentList[0], contentList[1], width, .utf8, size, "primary")
+                      raster.addText(String(decoding: line, as: UTF8.self), bold: bold, size: size, align: "left")
+                  }
+                  continue
+              case "feed":
+                  raster.addFeed((item["lines"] as? NSNumber)?.intValue ?? 1)
+                  continue
+              default:
+                  bytes.append(contentsOf: raster.flush())
+              }
+          }
+
           bytes.append(contentsOf: PrinterUtils.getAlignCmd(align))
           
           switch type {
@@ -444,7 +536,9 @@ public class ThermalPrinterModule: Module {
           // Reset align
           bytes.append(contentsOf: PrinterUtils.getAlignCmd("left"))
       }
-      
+
+      if let raster = raster { bytes.append(contentsOf: raster.flush()) }
+
       // Feed
       if feedLines > 0 {
           bytes.append(contentsOf: PrinterUtils.getFeedLinesCmd(feedLines))
@@ -454,4 +548,17 @@ public class ThermalPrinterModule: Module {
       bluetoothManager.write(data, promise)
     }
   }
+}
+
+// Promise.reject(code, description) de Expo deja el mensaje en JS como "undefined reason":
+// el texto viaja en `reason`, así que se sobreescribe aquí.
+final class PrinterException: Exception {
+  private let message: String
+
+  init(_ code: String, _ message: String) {
+    self.message = message
+    super.init(name: code, description: message, code: code)
+  }
+
+  override var reason: String { message }
 }
