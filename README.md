@@ -178,6 +178,10 @@ await ThermalPrinter.disconnect();
 - **`print(items: PrinterItem[], options?: PrintOptions): Promise<void>`**
   Envía datos a la impresora. Rechaza con `NOT_CONNECTED` si se invoca antes de
   `connect()` o `connectUsb()`.
+- **`addPrintProgressListener(listener: (e: { sent: number; total: number }) => void): { remove(): void }`**
+  Avance en bytes de `print()`. En iOS cuenta los bytes confirmados por BLE; en
+  Android/Bluetooth es un estimado a ~2.5 KB/s (el SDK no informa avance real) y
+  `print()` resuelve cuando el estimado llega al 100%. Llama `remove()` al terminar.
 
 ### Tipos
 
@@ -229,9 +233,11 @@ Opcional: `marginVertical` (líneas en blanco antes y después).
 
 #### `PrintOptions`
 - `width`: `number` (por defecto: 58)
-- `encoding`: `'utf-8' | 'gbk' | 'ascii' | 'cp1258' | 'windows-1252' | 'iso-8859-1' | 'pc850'` (por defecto: 'utf-8')
+- `encoding`: `'utf-8' | 'gbk' | 'ascii' | 'cp1258' | 'windows-1252' | 'iso-8859-1' | 'pc850' | 'userfont' | 'raster'` (por defecto: 'utf-8')
   - **Alias aceptados** (normalizados internamente): `utf8` → `utf-8`; `iso8859_1`, `iso88591`, `latin1` → `iso-8859-1`; `win1252` → `windows-1252`.
   > **Nota sobre acentos:** Si tienes problemas con caracteres especiales (á, ñ, etc.), intenta usar `windows-1252` o `pc850`.
+  > **`userfont`:** para impresoras cuya fuente ROM no imprime letras (p. ej. SAT AF330, que solo dibuja `# $ @ [ \ ] ^ \` { | } ~`). Descarga una fuente monoespaciada 12x24 con `ESC &` y la activa con `ESC % 1`; fija además el área de impresión a 576 puntos (80 mm) o 384 (58 mm). Los caracteres no-ASCII del ticket se dibujan en slots ASCII que el ticket no usa; si se acaban, se imprimen sin acento. Fuerza la fuente A. Envía ~3.5 KB extra por ticket.
+  > **`raster` (respaldo):** dibuja el texto, las tablas, los divisores y las dos columnas como imagen (`ESC *`) en la misma cuadrícula de 12x24 (48 columnas en 80 mm, 32 en 58 mm), así que no depende de fuentes ni de encodings de la impresora. Respeta alineación, negrita y tamaño; QR e imágenes siguen por su camino nativo. Mucho más pesado y lento (~100 KB por ticket contra ~6 KB de `userfont`); por BLE en iOS es muy lento.
 - `lineSpacing`: `number` (por defecto: 30)
 - `feedLines`: `number` (por defecto: 0)
 - `unaccent`: `boolean` — si es `true`, elimina acentos/diacríticos en JS antes de enviar (útil con codificaciones limitadas).

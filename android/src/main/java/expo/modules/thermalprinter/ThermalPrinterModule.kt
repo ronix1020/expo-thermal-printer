@@ -46,8 +46,10 @@ class ThermalPrinterModule : Module() {
         // del logo ~9KB) sale truncado. Esperamos ~ (bytes / DRAIN_BYTES_PER_MS) ms
         // antes de resolver para dar tiempo a que el buffer SPP se vacíe.
         // Constantes conservadoras y tuneables tras probar en la impresora real.
+        // Sin tope: write() vuelve en ~1 ms aunque sean 106 KB (raster), así que con el tope
+        // de 8 s la promesa resolvía con la impresora todavía recibiendo datos.
         private const val DRAIN_BYTES_PER_MS = 2.5   // ~2.5 KB/s (BT SPP conservador)
-        private const val MAX_DRAIN_MS = 8000L
+        private const val PROGRESS_TICK_MS = 200L
     }
 
     // USB
@@ -113,6 +115,9 @@ class ThermalPrinterModule : Module() {
 
     override fun definition() = ModuleDefinition {
         Name("ThermalPrinter")
+
+        // { sent, total } en bytes mientras se imprime (en Bluetooth es estimado, ver print).
+        Events("onPrintProgress")
 
         OnCreate {
             val intent = Intent(context, PosprinterService::class.java)
@@ -333,26 +338,81 @@ class ThermalPrinterModule : Module() {
                     "windows-1252" -> "windows-1252"
                     "iso-8859-1" -> "ISO-8859-1"
                     "pc850" -> "IBM850"
+                    "userfont" -> "US-ASCII"
                     else -> "UTF-8"
                 }
                 val charset = java.nio.charset.Charset.forName(charsetName)
 
+                // userfont: impresoras con la fuente ROM vacía (p.ej. SAT AF330 que solo dibuja # $ @ [ \ ] ^ ` { | } ~).
+                // Se descarga una fuente propia con ESC & y los caracteres no-ASCII se reasignan a slots libres.
+                val userFont = normalizeEncoding(encoding) == "userfont"
+                val userFontMap = if (userFont) buildUserFontMap(items) else emptyMap()
+                val printItems = if (userFont) items.map { remapUserFontItem(it, userFontMap) } else items
+
+                // raster: el texto se dibuja como imagen (ESC *); no depende de fuentes ni encodings de la impresora.
+                val raster = if (normalizeEncoding(encoding) == "raster") RasterText(width, lineSpacing) else null
+
                 // Initialize Printer
-                commands.add(byteArrayOf(0x1B, 0x40)) 
+                commands.add(byteArrayOf(0x1B, 0x40))
+
+                // La AF330 traía el área de impresión en 384 puntos con papel de 80 mm (cortaba a 32 columnas).
+                if (userFont || raster != null) commands.add(getPrintAreaCmd(width))
 
                 // Set Code Page
                 commands.add(getCodePageCmd(encoding))
 
+                if (userFont) commands.add(getUserFontCmd(userFontMap))
+
                 // Set Line Spacing
                 commands.add(getLineSpacingCmd(lineSpacing))
 
-                for (item in items) {
+                for (item in printItems) {
                     val type = item["type"] as? String ?: "text"
                     val content = item["content"] as? String ?: ""
                     val style = item["style"] as? Map<String, Any> ?: emptyMap()
                     
                     // 1. Alignment
                     val align = style["align"] as? String ?: "left"
+
+                    // Raster: se reusa el acomodo en columnas de los helpers de texto y se dibuja; QR e imagen siguen nativos.
+                    if (raster != null) {
+                        val bold = style["bold"] as? Boolean ?: false
+                        val size = resolveSize(style["size"])
+                        when (type) {
+                            "text" -> { raster.addText(content, bold, size, align); continue }
+                            "table" -> {
+                                val header = item["tableHeader"] as? List<String> ?: emptyList()
+                                val columnWidths = item["columnWidths"] as? List<Number> ?: emptyList()
+                                val columnAlignment = item["columnAlignment"] as? List<String> ?: emptyList()
+                                val contentList = item["content"] as? List<List<String>> ?: emptyList()
+                                if (columnWidths.isNotEmpty()) {
+                                    val table = getTableCmd(header, columnWidths, columnAlignment, contentList, width, Charsets.UTF_8)
+                                    raster.addText(String(table, Charsets.UTF_8).removeSuffix("\n"), false, 0, "left")
+                                }
+                                continue
+                            }
+                            "divider" -> {
+                                val charToUse = (item["charToUse"] ?: item["char"] ?: item["content"]) as? String ?: "-"
+                                val marginVertical = (item["marginVertical"] as? Number)?.toInt() ?: 0
+                                raster.addFeed(marginVertical)
+                                raster.addText(String(getDividerCmd(charToUse, width, Charsets.UTF_8), Charsets.UTF_8).removeSuffix("\n"), false, 0, "left")
+                                raster.addFeed(marginVertical)
+                                continue
+                            }
+                            "two-columns" -> {
+                                val contentList = item["content"] as? List<String>
+                                    ?: listOfNotNull(item["left"] as? String, item["right"] as? String)
+                                if (contentList.size >= 2) {
+                                    val line = getTwoColumnsCmd(contentList[0], contentList[1], width, Charsets.UTF_8, size, "primary")
+                                    raster.addText(String(line, Charsets.UTF_8), bold, size, "left")
+                                }
+                                continue
+                            }
+                            "feed" -> { raster.addFeed((item["lines"] as? Number)?.toInt() ?: 1); continue }
+                            else -> commands.add(raster.flush())
+                        }
+                    }
+
                     commands.add(getAlignCmd(align))
 
                     when (type) {
@@ -515,6 +575,8 @@ class ThermalPrinterModule : Module() {
                     commands.add(getAlignCmd("left"))
                 }
                 
+                if (raster != null) commands.add(raster.flush())
+
                 // Reset to default line spacing
                 commands.add(byteArrayOf(0x1B, 0x32))
                 
@@ -534,20 +596,28 @@ class ThermalPrinterModule : Module() {
                          // la impresora. En Bluetooth esperamos proporcional al tamaño
                          // para que el buffer drene antes de un disconnect() de la app y
                          // no se trunque el raster. USB drena distinto: resuelve directo.
+                         val total = finalData.size
                          if (currentConnectionType == "usb") {
+                             sendProgress(total, total)
                              promise.resolve(null)
                              return
                          }
-                         val drainMs = (finalData.size / DRAIN_BYTES_PER_MS)
-                             .toLong()
-                             .coerceIn(0L, MAX_DRAIN_MS)
-                         if (drainMs <= 0L) {
-                             promise.resolve(null)
-                         } else {
-                             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                 promise.resolve(null)
-                             }, drainMs)
-                         }
+                         // El progreso es el mismo estimado del drenado: el SDK no informa avance real.
+                         val drainMs = (total / DRAIN_BYTES_PER_MS).toLong()
+                         val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                         val drainStartedAt = android.os.SystemClock.elapsedRealtime()
+                         handler.post(object : Runnable {
+                             override fun run() {
+                                 val elapsed = android.os.SystemClock.elapsedRealtime() - drainStartedAt
+                                 if (elapsed >= drainMs) {
+                                     sendProgress(total, total)
+                                     promise.resolve(null)
+                                     return
+                                 }
+                                 sendProgress((elapsed * DRAIN_BYTES_PER_MS).toInt(), total)
+                                 handler.postDelayed(this, PROGRESS_TICK_MS)
+                             }
+                         })
                      }
                      override fun onfailed() {
                          logTx("write onfailed tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
@@ -558,6 +628,10 @@ class ThermalPrinterModule : Module() {
                 promise.reject("PRINT_FAILED", e.message, e)
             }
         }
+    }
+
+    private fun sendProgress(sent: Int, total: Int) {
+        sendEvent("onPrintProgress", mapOf("sent" to sent.coerceAtMost(total), "total" to total))
     }
 
     private fun connectToUsbDevice(device: UsbDevice, promise: Promise?) {
@@ -945,6 +1019,153 @@ fun getCodePageCmd(encoding: String): ByteArray {
         else -> 0x00 // Default to PC437 or printer default
     }
     return byteArrayOf(0x1B, 0x74, n.toByte())
+}
+
+/** GS L 0 + GS W: área de impresión completa para el ancho de papel (576 puntos en 80 mm, 384 en 58 mm). */
+fun getPrintAreaCmd(width: Int): ByteArray {
+    val dots = if (width >= 80) 576 else 384
+    return byteArrayOf(0x1D, 0x4C, 0x00, 0x00, 0x1D, 0x57, (dots and 0xFF).toByte(), (dots shr 8).toByte())
+}
+
+private fun collectStrings(value: Any?, out: StringBuilder) {
+    when (value) {
+        is String -> out.append(value)
+        is Map<*, *> -> value.values.forEach { collectStrings(it, out) }
+        is List<*> -> value.forEach { collectStrings(it, out) }
+    }
+}
+
+/**
+ * ESC & solo acepta 0x20-0x7E, así que cada carácter no-ASCII del ticket (á, Ñ, °, ¡...) se asigna a un
+ * carácter ASCII que el ticket no usa, y en ese slot se dibuja su glifo. QR e imágenes no usan la fuente.
+ */
+fun buildUserFontMap(items: List<Map<String, Any>>): Map<Char, Char> {
+    val text = StringBuilder()
+    items.filter { it["type"] != "qr" && it["type"] != "image" }.forEach { collectStrings(it, text) }
+    val used = text.filter { it.code in 0x21..0x7E }.toSet()
+    val needed = text.filter { it.code > 0x7E }.toSortedSet()
+    val free = (0x7E downTo 0x21).map { it.toChar() }.filter { it !in used }
+    return needed.zip(free).toMap()
+}
+
+private fun remapUserFontString(s: String, map: Map<Char, Char>): String = buildString {
+    for (c in s) {
+        append(when {
+            c.code <= 0x7E -> c
+            else -> map[c]
+                // Sin slots libres: se degrada a la letra sin acento.
+                ?: java.text.Normalizer.normalize(c.toString(), java.text.Normalizer.Form.NFD).firstOrNull { it.code in 0x20..0x7E }
+                ?: '?'
+        })
+    }
+}
+
+@Suppress("UNCHECKED_CAST")
+fun remapUserFontItem(item: Map<String, Any>, map: Map<Char, Char>): Map<String, Any> {
+    val type = item["type"]
+    if (type == "qr" || type == "image") return item
+    fun remap(value: Any?): Any? = when (value) {
+        is String -> remapUserFontString(value, map)
+        is Map<*, *> -> value.mapValues { remap(it.value) }
+        is List<*> -> value.map { remap(it) }
+        else -> value
+    }
+    val out = item.mapValues { (k, v) -> if (k == "type" || k == "style") v else remap(v)!! }.toMutableMap()
+    // Solo se descarga la fuente A (12x24); con la fuente B los caracteres saldrían en blanco.
+    val style = (item["style"] as? Map<String, Any> ?: emptyMap()) + ("font" to "primary")
+    out["style"] = style
+    return out
+}
+
+/** ESC & 3 0x20 0x7E con glifos monoespaciados de 12x24 (fuente A) + ESC % 1 para activarlos. */
+fun getUserFontCmd(map: Map<Char, Char>): ByteArray {
+    val w = 12
+    val h = 24
+    val glyphs = HashMap<Int, Char>()
+    for (code in 0x20..0x7E) glyphs[code] = code.toChar()
+    for ((orig, slot) in map) glyphs[slot.code] = orig
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+    val paint = android.graphics.Paint().apply {
+        typeface = android.graphics.Typeface.MONOSPACE
+        textSize = 20f
+        isAntiAlias = true
+        color = android.graphics.Color.BLACK
+    }
+    val baseline = h - paint.descent() - 1f
+    val out = java.io.ByteArrayOutputStream()
+    out.write(byteArrayOf(0x1B, 0x26, 0x03, 0x20, 0x7E))
+    for (code in 0x20..0x7E) {
+        val ch = glyphs[code].toString()
+        bmp.eraseColor(android.graphics.Color.WHITE)
+        canvas.drawText(ch, (w - paint.measureText(ch)) / 2f, baseline, paint)
+        out.write(w)
+        // Columna a columna, 3 bytes de arriba hacia abajo, MSB arriba.
+        for (x in 0 until w) for (yb in 0 until 3) {
+            var b = 0
+            for (bit in 0 until 8) {
+                if (android.graphics.Color.red(bmp.getPixel(x, yb * 8 + bit)) < 128) b = b or (0x80 shr bit)
+            }
+            out.write(b)
+        }
+    }
+    out.write(byteArrayOf(0x1B, 0x25, 0x01))
+    return out.toByteArray()
+}
+
+/**
+ * Acumula líneas de texto y las dibuja en la misma cuadrícula que la fuente A (12x24 por carácter,
+ * 48/32/24 columnas), para que tablas y columnas queden igual que en modo texto. flush() las entrega
+ * como bit-image ESC * vía bitmapToBytes.
+ */
+class RasterText(printerWidth: Int, private val lineSpacing: Int) {
+    private class Line(val text: String, val bold: Boolean, val size: Int, val align: String)
+
+    private val dots = when { printerWidth >= 80 -> 576; printerWidth >= 58 -> 384; else -> 288 }
+    private val cols = dots / 12
+    private val lines = ArrayList<Line>()
+
+    fun addText(text: String, bold: Boolean, size: Int, align: String) {
+        val perLine = cols / ((size shr 4) + 1)
+        for (raw in text.split("\n")) {
+            // Igual que la impresora: corta al llegar al ancho.
+            if (raw.isEmpty()) lines.add(Line("", bold, size, align))
+            else raw.chunked(perLine).forEach { lines.add(Line(it, bold, size, align)) }
+        }
+    }
+
+    fun addFeed(n: Int) = repeat(n.coerceAtLeast(0)) { lines.add(Line("", false, 0, "left")) }
+
+    private fun lineHeight(line: Line) = 24 * ((line.size and 0x0F) + 1) + (lineSpacing - 24).coerceAtLeast(0)
+
+    fun flush(): ByteArray {
+        if (lines.isEmpty()) return ByteArray(0)
+        val height = lines.sumOf { lineHeight(it) }
+        val bmp = Bitmap.createBitmap(dots, (height + 23) / 24 * 24, Bitmap.Config.ARGB_8888)
+        bmp.eraseColor(android.graphics.Color.WHITE)
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint().apply { isAntiAlias = true; color = android.graphics.Color.BLACK }
+        var y = 0
+        for (line in lines) {
+            val w = (line.size shr 4) + 1
+            val h = (line.size and 0x0F) + 1
+            // MONOSPACE avanza 0.6 em: textSize 20 da celdas de 12 px; textScaleX estira a lo ancho.
+            paint.typeface = android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE,
+                if (line.bold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            paint.textSize = 20f * h
+            paint.textScaleX = w.toFloat() / h
+            val lineWidth = line.text.length * 12 * w
+            val x = when (line.align) {
+                "center" -> (dots - lineWidth) / 2
+                "right" -> dots - lineWidth
+                else -> 0
+            }.coerceAtLeast(0)
+            canvas.drawText(line.text, x.toFloat(), y + 24f * h - paint.descent() - h, paint)
+            y += lineHeight(line)
+        }
+        lines.clear()
+        return bitmapToBytes(bmp)
+    }
 }
 
 /**
