@@ -3,20 +3,21 @@ package expo.modules.thermalprinter
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import android.os.Build
-import android.os.IBinder
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.app.PendingIntent
 import androidx.core.app.ActivityCompat
@@ -24,32 +25,39 @@ import androidx.core.content.ContextCompat
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import net.posprinter.posprinterface.IMyBinder
-import net.posprinter.posprinterface.UiExecute
-import net.posprinter.service.PosprinterService
 import java.util.ArrayList
+import java.util.UUID
+import java.util.concurrent.Executors
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 
 class ThermalPrinterModule : Module() {
-    private var myBinder: IMyBinder? = null
-    private var serviceConnection: ServiceConnection? = null
     // Transporte activo ("bluetooth" | "usb" | null). Se usa para aplicar el
     // retardo de drenado solo en Bluetooth (ver AsyncFunction("print")).
-    private var currentConnectionType: String? = null
+    @Volatile private var currentConnectionType: String? = null
     private val context: Context
         get() = appContext.reactContext ?: throw IllegalStateException("React Context is null")
 
+    // Transporte propio (antes, el .jar de XPrinter): socket SPP en Bluetooth, bulkTransfer en USB.
+    // Todo el I/O pasa por un solo hilo: connect/write/disconnect no se pisan y un envío largo
+    // no bloquea la cola de AsyncFunction de Expo, que comparten todos los módulos.
+    private val io = Executors.newSingleThreadExecutor()
+    @Volatile private var btSocket: BluetoothSocket? = null
+    @Volatile private var usbConnection: UsbDeviceConnection? = null
+    private var usbInterface: UsbInterface? = null
+    private var usbEndpoint: UsbEndpoint? = null
+
     companion object {
-        // El callback onsucess() de myBinder.write() confirma "entregado al buffer
-        // SPP", NO "recibido por la impresora". Si la app llama disconnect() justo
-        // después, el socket se cierra antes de drenar y un payload grande (raster
-        // del logo ~9KB) sale truncado. Esperamos ~ (bytes / DRAIN_BYTES_PER_MS) ms
-        // antes de resolver para dar tiempo a que el buffer SPP se vacíe.
-        // Constantes conservadoras y tuneables tras probar en la impresora real.
-        // Sin tope: write() vuelve en ~1 ms aunque sean 106 KB (raster), así que con el tope
-        // de 8 s la promesa resolvía con la impresora todavía recibiendo datos.
+        // BluetoothSocket.write() vuelve cuando el stack Bluetooth de Android tiene los bytes en
+        // su buffer (~1 ms aunque sean 106 KB de raster), NO cuando la impresora los recibió, y
+        // flush() no espera más. Si la app llama disconnect() justo después, el socket se cierra
+        // antes de drenar y el ticket sale truncado. Esperamos ~ (bytes / DRAIN_BYTES_PER_MS) ms,
+        // sin tope, antes de resolver. Constante conservadora y tuneable en la impresora real.
         private const val DRAIN_BYTES_PER_MS = 2.5   // ~2.5 KB/s (BT SPP conservador)
         private const val PROGRESS_TICK_MS = 200L
+        private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        private const val USB_CHUNK = 16384   // máximo de bulkTransfer antes de API 28
+        private const val USB_TIMEOUT_MS = 5000
     }
 
     // USB
@@ -119,29 +127,9 @@ class ThermalPrinterModule : Module() {
         // { sent, total } en bytes mientras se imprime (en Bluetooth es estimado, ver print).
         Events("onPrintProgress")
 
-        OnCreate {
-            val intent = Intent(context, PosprinterService::class.java)
-            serviceConnection = object : ServiceConnection {
-                override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                    myBinder = service as? IMyBinder
-                    // Bind recién hecho: el servicio arranca con xPrinterDev == null (onCreate() no lo
-                    // inicializa), así que nunca hay puerto abierto. Limpiar evita que un valor viejo
-                    // deje pasar los gates de print()/isConnected() tras recrearse el servicio.
-                    currentConnectionType = null
-                }
-                override fun onServiceDisconnected(name: ComponentName?) {
-                    myBinder = null
-                    currentConnectionType = null
-                }
-            }
-            context.bindService(intent, serviceConnection!!, Context.BIND_AUTO_CREATE)
-        }
-
         OnDestroy {
-            serviceConnection?.let {
-                context.unbindService(it)
-            }
-            currentConnectionType = null
+            io.execute { closeTransport() }
+            io.shutdown()
         }
 
         AsyncFunction("scanDevices") { type: String, promise: Promise ->
@@ -207,35 +195,28 @@ class ThermalPrinterModule : Module() {
                 return@AsyncFunction
             }
 
-            // The printer service binds asynchronously in OnCreate; on a cold start
-            // it may not be ready yet. Wait briefly before giving up.
-            var waited = 0
-            while (myBinder == null && waited < 2000) {
-                Thread.sleep(100)
-                waited += 100
-            }
-            if (myBinder == null) {
-                promise.reject("SERVICE_NOT_BOUND", "Printer service not bound", null)
-                return@AsyncFunction
-            }
-
-            myBinder?.connectBtPort(macAddress, object : UiExecute {
-                override fun onsucess() { // Assuming method name based on typos common in these SDKs or standard naming
-                     currentConnectionType = "bluetooth"
-                     promise.resolve(null)
+            io.execute {
+                try {
+                    closeTransport()
+                    // Un discovery activo hace muy lento o falla el connect RFCOMM. Sin BLUETOOTH_SCAN lanza SecurityException.
+                    runCatching { adapter.cancelDiscovery() }
+                    val socket = adapter.getRemoteDevice(macAddress).createRfcommSocketToServiceRecord(SPP_UUID)
+                    try {
+                        socket.connect()
+                    } catch (e: Exception) {
+                        runCatching { socket.close() }
+                        throw e
+                    }
+                    btSocket = socket
+                    currentConnectionType = "bluetooth"
+                    promise.resolve(null)
+                } catch (e: Exception) {
+                    promise.reject("CONNECTION_FAILED", e.message ?: "Failed to connect to printer", e)
                 }
-                override fun onfailed() {
-                     promise.reject("CONNECTION_FAILED", "Failed to connect to printer", null)
-                }
-            })
+            }
         }
 
         AsyncFunction("connectUsb") { promise: Promise ->
-            if (myBinder == null) {
-                promise.reject("SERVICE_NOT_BOUND", "Service not bound", null)
-                return@AsyncFunction
-            }
-
             val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
             val deviceList = usbManager.deviceList
             
@@ -279,52 +260,25 @@ class ThermalPrinterModule : Module() {
         }
 
         AsyncFunction("disconnect") { promise: Promise ->
-             // Nada que desconectar si el servicio no está ligado o si nunca se abrió un puerto.
-             // disconnectCurrentPort() hace xPrinterDev.Close() SIN null-check y la NPE ocurre en el
-             // hilo de fondo del AsyncTask → crash duro. currentConnectionType solo es != null tras un
-             // connect exitoso: es el gate seguro.
-             if (myBinder == null || currentConnectionType == null) {
-                 currentConnectionType = null
+             // En el hilo de I/O: si hay un envío en curso, se cierra después de que termine.
+             io.execute {
+                 closeTransport()
                  promise.resolve(null)
-                 return@AsyncFunction
              }
-             myBinder?.disconnectCurrentPort(object : UiExecute {
-                 override fun onsucess() {
-                     currentConnectionType = null
-                     promise.resolve(null)
-                 }
-                 override fun onfailed() {
-                     promise.reject("DISCONNECT_FAILED", "Failed to disconnect", null)
-                 }
-             })
         }
 
         AsyncFunction("isConnected") { promise: Promise ->
-             // checkLinkedState() -> MyBinder$8.doinbackground() hace xPrinterDev.GetPortInfo() SIN
-             // null-check, y PosAsynncTask no tiene try/catch: la NPE revienta en el hilo de fondo del
-             // AsyncTask y NO es atrapable desde Kotlin ni desde JS. Sin conexión real respondemos
-             // false en vez de crashear; y resolvemos SIEMPRE (antes, con myBinder null, el safe-call
-             // `?.` dejaba la promesa colgada para siempre del lado JS).
-             val binder = myBinder
-             if (binder == null || currentConnectionType == null) {
-                 promise.resolve(false)
-                 return@AsyncFunction
-             }
-             binder.checkLinkedState(object : UiExecute {
-                 override fun onsucess() {
-                     promise.resolve(true)
-                 }
-                 override fun onfailed() {
-                     promise.resolve(false)
-                 }
+             // Estado local del transporte: un BluetoothSocket no detecta que la impresora se apagó
+             // hasta que falla un write, y entonces print() rechaza y limpia la conexión.
+             promise.resolve(when (currentConnectionType) {
+                 "bluetooth" -> btSocket?.isConnected == true
+                 "usb" -> usbConnection != null
+                 else -> false
              })
         }
 
         AsyncFunction("print") { items: List<Map<String, Any>>, width: Int, encoding: String, lineSpacing: Int, feedLines: Int, promise: Promise ->
-            // write() -> MyBinder$5.doinbackground() -> xPrinterDev.Write(data) SIN null-check, y
-            // PosAsynncTask no tiene try/catch: la NPE revienta en el hilo de fondo y NO es atrapable.
-            // myBinder NO sirve de gate (BIND_AUTO_CREATE lo deja no-null sin conexión); currentConnectionType sí.
-            if (myBinder == null || currentConnectionType == null) {
+            if (currentConnectionType == null) {
                 promise.reject("NOT_CONNECTED", "Printer is not connected. Call connect() first.", null)
                 return@AsyncFunction
             }
@@ -589,41 +543,55 @@ class ThermalPrinterModule : Module() {
                 logTxDump(finalData, width, encoding, currentConnectionType)
                 val txStartedAt = android.os.SystemClock.elapsedRealtime()
 
-                myBinder?.write(finalData, object : UiExecute {
-                     override fun onsucess() {
-                         logTx("write onsucess tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
-                         // onsucess() = bytes entregados al buffer SPP, no recibidos por
-                         // la impresora. En Bluetooth esperamos proporcional al tamaño
-                         // para que el buffer drene antes de un disconnect() de la app y
-                         // no se trunque el raster. USB drena distinto: resuelve directo.
-                         val total = finalData.size
-                         if (currentConnectionType == "usb") {
-                             sendProgress(total, total)
-                             promise.resolve(null)
-                             return
-                         }
-                         // El progreso es el mismo estimado del drenado: el SDK no informa avance real.
-                         val drainMs = (total / DRAIN_BYTES_PER_MS).toLong()
-                         val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                         val drainStartedAt = android.os.SystemClock.elapsedRealtime()
-                         handler.post(object : Runnable {
-                             override fun run() {
-                                 val elapsed = android.os.SystemClock.elapsedRealtime() - drainStartedAt
-                                 if (elapsed >= drainMs) {
-                                     sendProgress(total, total)
-                                     promise.resolve(null)
-                                     return
-                                 }
-                                 sendProgress((elapsed * DRAIN_BYTES_PER_MS).toInt(), total)
-                                 handler.postDelayed(this, PROGRESS_TICK_MS)
-                             }
-                         })
-                     }
-                     override fun onfailed() {
-                         logTx("write onfailed tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
-                         promise.reject("PRINT_FAILED", "Failed to send data", null)
-                     }
-                })
+                io.execute {
+                    val total = finalData.size
+                    try {
+                        val usb = usbConnection
+                        val ep = usbEndpoint
+                        if (currentConnectionType == "usb" && usb != null && ep != null) {
+                            // bulkTransfer es síncrono con el dispositivo: aquí el progreso es real y no hay que drenar.
+                            var offset = 0
+                            while (offset < total) {
+                                val len = minOf(USB_CHUNK, total - offset)
+                                val n = usb.bulkTransfer(ep, finalData, offset, len, USB_TIMEOUT_MS)
+                                if (n <= 0) throw IOException("USB bulkTransfer failed ($n)")
+                                offset += n
+                                sendProgress(offset, total)
+                            }
+                            logTx("write USB tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
+                            promise.resolve(null)
+                            return@execute
+                        }
+                        val out = btSocket?.outputStream ?: throw IOException("Printer is not connected")
+                        out.write(finalData)
+                        out.flush()
+                    } catch (e: Exception) {
+                        logTx("write falló tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms: ${e.message}")
+                        // Socket roto (p.ej. impresora apagada): se cierra para que isConnected() dé false.
+                        closeTransport()
+                        promise.reject("PRINT_FAILED", e.message ?: "Failed to send data", e)
+                        return@execute
+                    }
+                    logTx("write BT tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
+                    // En Bluetooth esperamos proporcional al tamaño para que el buffer del stack drene
+                    // antes de un disconnect() de la app (ver DRAIN_BYTES_PER_MS). El progreso es ese
+                    // mismo estimado: Android no informa cuánto recibió la impresora.
+                    val drainMs = (total / DRAIN_BYTES_PER_MS).toLong()
+                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                    val drainStartedAt = android.os.SystemClock.elapsedRealtime()
+                    handler.post(object : Runnable {
+                        override fun run() {
+                            val elapsed = android.os.SystemClock.elapsedRealtime() - drainStartedAt
+                            if (elapsed >= drainMs) {
+                                sendProgress(total, total)
+                                promise.resolve(null)
+                                return
+                            }
+                            sendProgress((elapsed * DRAIN_BYTES_PER_MS).toInt(), total)
+                            handler.postDelayed(this, PROGRESS_TICK_MS)
+                        }
+                    })
+                }
             } catch (e: Exception) {
                 promise.reject("PRINT_FAILED", e.message, e)
             }
@@ -634,20 +602,58 @@ class ThermalPrinterModule : Module() {
         sendEvent("onPrintProgress", mapOf("sent" to sent.coerceAtMost(total), "total" to total))
     }
 
-    private fun connectToUsbDevice(device: UsbDevice, promise: Promise?) {
-        try {
-            myBinder?.connectUsbPort(context, device.deviceName, object : UiExecute {
-                override fun onsucess() {
-                    currentConnectionType = "usb"
-                    promise?.resolve(device.deviceName)
-                }
+    /** Solo desde el hilo `io`. Cierra lo que haya abierto; nunca lanza. */
+    private fun closeTransport() {
+        currentConnectionType = null
+        btSocket?.let { runCatching { it.close() } }
+        btSocket = null
+        usbConnection?.let { conn ->
+            usbInterface?.let { runCatching { conn.releaseInterface(it) } }
+            runCatching { conn.close() }
+        }
+        usbConnection = null
+        usbInterface = null
+        usbEndpoint = null
+    }
 
-                override fun onfailed() {
-                    promise?.reject("CONNECTION_FAILED", "Failed to connect to USB printer", null)
+    private fun connectToUsbDevice(device: UsbDevice, promise: Promise?) {
+        io.execute {
+            try {
+                closeTransport()
+                // La interfaz de clase impresora primero; si no hay, cualquiera con un endpoint bulk OUT.
+                val candidates = (0 until device.interfaceCount).map { device.getInterface(it) }
+                    .sortedBy { if (it.interfaceClass == UsbConstants.USB_CLASS_PRINTER) 0 else 1 }
+                var intf: UsbInterface? = null
+                var endpoint: UsbEndpoint? = null
+                for (candidate in candidates) {
+                    endpoint = (0 until candidate.endpointCount).map { candidate.getEndpoint(it) }.firstOrNull {
+                        it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT
+                    }
+                    if (endpoint != null) { intf = candidate; break }
                 }
-            })
-        } catch (e: Exception) {
-            promise?.reject("ERROR", e.message, e)
+                if (intf == null || endpoint == null) {
+                    promise?.reject("CONNECTION_FAILED", "USB printer has no bulk OUT endpoint", null)
+                    return@execute
+                }
+                val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                val conn = usbManager.openDevice(device)
+                if (conn == null) {
+                    promise?.reject("CONNECTION_FAILED", "Failed to open USB printer", null)
+                    return@execute
+                }
+                if (!conn.claimInterface(intf, true)) {
+                    conn.close()
+                    promise?.reject("CONNECTION_FAILED", "Failed to claim USB printer interface", null)
+                    return@execute
+                }
+                usbConnection = conn
+                usbInterface = intf
+                usbEndpoint = endpoint
+                currentConnectionType = "usb"
+                promise?.resolve(device.deviceName)
+            } catch (e: Exception) {
+                promise?.reject("CONNECTION_FAILED", e.message ?: "Failed to connect to USB printer", e)
+            }
         }
     }
 }
@@ -657,7 +663,7 @@ class ThermalPrinterModule : Module() {
 private const val LOG_TAG = "ThermalPrinter"
 
 /**
- * Diagnóstico: volcado hex del payload EXACTO que se entrega al SDK en `print()`.
+ * Diagnóstico: volcado hex del payload EXACTO que se manda al transporte en `print()`.
  *
  * Apagado por defecto (un ticket lleva datos del cliente y no debe caer en logcat
  * en un build normal). Se activa en el dispositivo, sin recompilar ni cambiar la
