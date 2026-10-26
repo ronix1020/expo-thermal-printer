@@ -14,6 +14,10 @@
 - Android: en USB, `onPrintProgress` es real (por bloque de `bulkTransfer`). En
   Bluetooth sigue la espera estimada: `write()` vuelve en cuanto el stack de Android
   tiene los bytes en buffer, igual que con el SDK.
+- Android/Bluetooth: si la impresora se apaga o se pierde el enlace mientras `print()`
+  espera el drenado, la promesa rechaza con `PRINT_FAILED` ("Printer disconnected
+  during print"), el progreso se detiene e `isConnected()` devuelve `false`. Antes
+  `print()` resolvía igual, porque `write()` no se entera.
 - `disconnect()` ya no rechaza con `DISCONNECT_FAILED`; siempre resuelve.
 - La API JS no cambia.
 

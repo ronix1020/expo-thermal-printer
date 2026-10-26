@@ -47,6 +47,11 @@ class ThermalPrinterModule : Module() {
     private var usbInterface: UsbInterface? = null
     private var usbEndpoint: UsbEndpoint? = null
 
+    // print() de Bluetooth esperando el drenado (tick de progreso → promesa). Solo en el hilo principal;
+    // si el enlace cae mientras esperan, se rechazan (ver watchLink).
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val drains = HashMap<Runnable, Promise>()
+
     companion object {
         // BluetoothSocket.write() vuelve cuando el stack Bluetooth de Android tiene los bytes en
         // su buffer (~1 ms aunque sean 106 KB de raster), NO cuando la impresora los recibió, y
@@ -209,6 +214,7 @@ class ThermalPrinterModule : Module() {
                     }
                     btSocket = socket
                     currentConnectionType = "bluetooth"
+                    watchLink(socket)
                     promise.resolve(null)
                 } catch (e: Exception) {
                     promise.reject("CONNECTION_FAILED", e.message ?: "Failed to connect to printer", e)
@@ -562,7 +568,7 @@ class ThermalPrinterModule : Module() {
                             promise.resolve(null)
                             return@execute
                         }
-                        val out = btSocket?.outputStream ?: throw IOException("Printer is not connected")
+                        val out = btSocket?.outputStream ?: throw IOException("Printer disconnected")
                         out.write(finalData)
                         out.flush()
                     } catch (e: Exception) {
@@ -577,20 +583,24 @@ class ThermalPrinterModule : Module() {
                     // antes de un disconnect() de la app (ver DRAIN_BYTES_PER_MS). El progreso es ese
                     // mismo estimado: Android no informa cuánto recibió la impresora.
                     val drainMs = (total / DRAIN_BYTES_PER_MS).toLong()
-                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
                     val drainStartedAt = android.os.SystemClock.elapsedRealtime()
-                    handler.post(object : Runnable {
+                    val tick = object : Runnable {
                         override fun run() {
                             val elapsed = android.os.SystemClock.elapsedRealtime() - drainStartedAt
                             if (elapsed >= drainMs) {
+                                drains.remove(this)
                                 sendProgress(total, total)
                                 promise.resolve(null)
                                 return
                             }
                             sendProgress((elapsed * DRAIN_BYTES_PER_MS).toInt(), total)
-                            handler.postDelayed(this, PROGRESS_TICK_MS)
+                            mainHandler.postDelayed(this, PROGRESS_TICK_MS)
                         }
-                    })
+                    }
+                    mainHandler.post {
+                        drains[tick] = promise
+                        tick.run()
+                    }
                 }
             } catch (e: Exception) {
                 promise.reject("PRINT_FAILED", e.message, e)
@@ -600,6 +610,35 @@ class ThermalPrinterModule : Module() {
 
     private fun sendProgress(sent: Int, total: Int) {
         sendEvent("onPrintProgress", mapOf("sent" to sent.coerceAtMost(total), "total" to total))
+    }
+
+    /**
+     * write() no se entera si la impresora se apaga (el stack ya tiene los bytes), pero read() devuelve -1
+     * o lanza cuando cae el enlace. La lib no usa nada de lo que manda la impresora, así que se descarta.
+     */
+    private fun watchLink(socket: BluetoothSocket) {
+        kotlin.concurrent.thread(isDaemon = true, name = "ThermalPrinter-bt-link") {
+            val buf = ByteArray(64)
+            try {
+                while (socket.inputStream.read(buf) >= 0) { }
+            } catch (e: Exception) { }
+            // Tras OnDestroy el executor ya no acepta tareas: nada que limpiar.
+            runCatching {
+                io.execute {
+                    // Si el socket ya no es el activo, lo cerró disconnect()/connect(): no es una caída.
+                    if (btSocket !== socket) return@execute
+                    android.util.Log.w(LOG_TAG, "Bluetooth link lost")
+                    closeTransport()
+                    mainHandler.post {
+                        for ((tick, promise) in drains) {
+                            mainHandler.removeCallbacks(tick)
+                            promise.reject("PRINT_FAILED", "Printer disconnected during print", null)
+                        }
+                        drains.clear()
+                    }
+                }
+            }
+        }
     }
 
     /** Solo desde el hilo `io`. Cierra lo que haya abierto; nunca lanza. */
