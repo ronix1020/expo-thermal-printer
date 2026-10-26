@@ -164,7 +164,7 @@ await ThermalPrinter.disconnect();
   `connect()` o `connectUsb()`.
 - **`addPrintProgressListener(listener: (e: { sent: number; total: number }) => void): { remove(): void }`**
   Avance en bytes de `print()`. En iOS cuenta los bytes confirmados por BLE y en
-  Android/USB los transferidos por `bulkTransfer`; en Android/Bluetooth es un estimado a ~2.5 KB/s (Android no informa cuánto recibió la impresora) y
+  Android/USB los transferidos por `bulkTransfer`; en Android/Bluetooth es un estimado a ~12 KB/s (Android no informa cuánto recibió la impresora) y
   `print()` resuelve cuando el estimado llega al 100%. Llama `remove()` al terminar.
 
 ### Tipos

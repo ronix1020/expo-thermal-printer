@@ -18,6 +18,8 @@
   espera el drenado, la promesa rechaza con `PRINT_FAILED` ("Printer disconnected
   during print"), el progreso se detiene e `isConnected()` devuelve `false`. Antes
   `print()` resolvía igual, porque `write()` no se entera.
+- Android/Bluetooth: la espera de drenado y la barra de progreso estiman 12 KB/s en
+  lugar de 2.5 (medido ~16 KB/s en una SAT AF330). Un raster de 106 KB espera ~9 s.
 - `disconnect()` ya no rechaza con `DISCONNECT_FAILED`; siempre resuelve.
 - La API JS no cambia.
 

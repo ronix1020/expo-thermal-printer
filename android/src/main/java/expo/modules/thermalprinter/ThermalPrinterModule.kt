@@ -57,8 +57,11 @@ class ThermalPrinterModule : Module() {
         // su buffer (~1 ms aunque sean 106 KB de raster), NO cuando la impresora los recibió, y
         // flush() no espera más. Si la app llama disconnect() justo después, el socket se cierra
         // antes de drenar y el ticket sale truncado. Esperamos ~ (bytes / DRAIN_BYTES_PER_MS) ms,
-        // sin tope, antes de resolver. Constante conservadora y tuneable en la impresora real.
-        private const val DRAIN_BYTES_PER_MS = 2.5   // ~2.5 KB/s (BT SPP conservador)
+        // sin tope, antes de resolver. También es la velocidad de la barra de progreso.
+        // Medido 2026-10-26: SAT AF330 + moto g75, raster de 76,553 B impreso en 4.5–5 s → ~16 B/ms.
+        // 12 queda ~30% más lento que eso para dar margen a térmicas más lentas. Una sola medición:
+        // si una impresora corta el ticket al desconectar justo después de print(), bajar este valor.
+        private const val DRAIN_BYTES_PER_MS = 12.0
         private const val PROGRESS_TICK_MS = 200L
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val USB_CHUNK = 16384   // máximo de bulkTransfer antes de API 28
