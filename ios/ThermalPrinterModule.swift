@@ -14,6 +14,10 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   private var currentWriteType: CBCharacteristicWriteType = .withResponse
   // Progreso del envío en bytes; se avisa solo cuando cambia el porcentaje.
   var onProgress: ((Int, Int) -> Void)?
+  // El enlace cayó solo (no por disconnect()): ms desde el último print que resolvió, 0 si había
+  // uno en vuelo (ese ya rechaza), nil si no hubo print en esta conexión.
+  var onConnectionLost: ((Int?) -> Void)?
+  private var lastPrintDoneAt: TimeInterval?
   private var totalBytes = 0
   private var sentBytes = 0
   private var lastPercent = -1
@@ -112,19 +116,23 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
             reportProgress(chunk.count)
         }
-        writePromise?.resolve(nil)   // todos los chunks despachados
-        writePromise = nil
+        resolveWrite()   // todos los chunks despachados
     } else {
         // .withResponse: enviar uno y esperar el ACK (didWriteValueFor) para el siguiente.
         guard !pendingChunks.isEmpty else {
-            writePromise?.resolve(nil)
-            writePromise = nil
+            resolveWrite()
             return
         }
         let chunk = pendingChunks.removeFirst()
         inFlightBytes = chunk.count
         peripheral.writeValue(chunk, for: characteristic, type: .withResponse)
     }
+  }
+
+  private func resolveWrite() {
+    writePromise?.resolve(nil)
+    writePromise = nil
+    lastPrintDoneAt = ProcessInfo.processInfo.systemUptime
   }
 
   // Bytes del chunk .withResponse que espera su ACK; cuenta como enviado al llegar el ACK.
@@ -142,8 +150,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
          reportProgress(inFlightBytes)
          inFlightBytes = 0
          if pendingChunks.isEmpty {
-             writePromise?.resolve(nil)
-             writePromise = nil
+             resolveWrite()
          } else {
              sendPendingChunks()
          }
@@ -244,6 +251,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
     connectedPeripheral = peripheral
+    lastPrintDoneAt = nil
     peripheral.delegate = self
     peripheral.discoverServices(nil)
   }
@@ -256,8 +264,15 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
     // Si el enlace cae con una escritura en vuelo, rechazar la promesa pendiente en lugar de
     // dejarla colgada para siempre (la impresión vieja truncaba; la nueva, sin esto, colgaría).
+    // disconnect() ya puso connectedPeripheral en nil: solo es caída si este era el periférico activo.
+    let spontaneous = connectedPeripheral == peripheral
+    let printing = writePromise != nil
     failPendingWrite(error?.localizedDescription ?? "Peripheral disconnected during write")
     connectedPeripheral = nil
+    if spontaneous {
+      let ms: Int? = printing ? 0 : lastPrintDoneAt.map { Int((ProcessInfo.processInfo.systemUptime - $0) * 1000) }
+      onConnectionLost?(ms)
+    }
   }
   
   // MARK: - CBPeripheralDelegate
@@ -306,11 +321,15 @@ public class ThermalPrinterModule: Module {
     Name("ThermalPrinter")
 
     // { sent, total } en bytes mientras se envía (ACKs reales de BLE).
-    Events("onPrintProgress")
+    // { msSinceLastPrint: number | null } cuando el enlace cae solo (no por disconnect()).
+    Events("onPrintProgress", "onConnectionLost")
 
     OnCreate {
       self.bluetoothManager.onProgress = { [weak self] sent, total in
         self?.sendEvent("onPrintProgress", ["sent": sent, "total": total])
+      }
+      self.bluetoothManager.onConnectionLost = { [weak self] ms in
+        self?.sendEvent("onConnectionLost", ["msSinceLastPrint": ms])
       }
     }
 

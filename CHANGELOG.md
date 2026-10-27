@@ -14,6 +14,18 @@
 - Android: en USB, `onPrintProgress` es real (por bloque de `bulkTransfer`). En
   Bluetooth sigue la espera estimada: `write()` vuelve en cuanto el stack de Android
   tiene los bytes en buffer, igual que con el SDK.
+- Android/Bluetooth: si la impresora se apaga o se pierde el enlace mientras `print()`
+  espera el drenado, la promesa rechaza con `PRINT_FAILED` ("Printer disconnected
+  during print"), el progreso se detiene e `isConnected()` devuelve `false`. Antes
+  `print()` resolvía igual, porque `write()` no se entera.
+- Android/Bluetooth: la espera de drenado y la barra de progreso estiman 12 KB/s en
+  lugar de 2.5 (medido ~16 KB/s en una SAT AF330). Un raster de 106 KB espera ~9 s.
+- Nuevo evento `addConnectionLostListener(({ msSinceLastPrint }) => ...)` (Android/Bluetooth
+  e iOS) cuando el enlace cae solo. En Android la caída se detecta 5-20 s tarde, casi
+  siempre después de que `print()` resolvió: el evento permite avisar que el último ticket
+  pudo salir incompleto. La SAT AF330 no responde a `DLE EOT`/`GS I`/`GS r`, así que no hay
+  forma de confirmarlo antes.
+- Android: un `write()` fallido rechaza con `"Printer disconnected: ..."`.
 - `disconnect()` ya no rechaza con `DISCONNECT_FAILED`; siempre resuelve.
 - La API JS no cambia.
 

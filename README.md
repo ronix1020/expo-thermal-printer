@@ -164,8 +164,15 @@ await ThermalPrinter.disconnect();
   `connect()` o `connectUsb()`.
 - **`addPrintProgressListener(listener: (e: { sent: number; total: number }) => void): { remove(): void }`**
   Avance en bytes de `print()`. En iOS cuenta los bytes confirmados por BLE y en
-  Android/USB los transferidos por `bulkTransfer`; en Android/Bluetooth es un estimado a ~2.5 KB/s (Android no informa cuánto recibió la impresora) y
+  Android/USB los transferidos por `bulkTransfer`; en Android/Bluetooth es un estimado a ~12 KB/s (Android no informa cuánto recibió la impresora) y
   `print()` resuelve cuando el estimado llega al 100%. Llama `remove()` al terminar.
+- **`addConnectionLostListener(listener: (e: { msSinceLastPrint: number | null }) => void): { remove(): void }`**
+  Avisa cuando el enlace cae solo (impresora apagada o fuera de alcance), no por `disconnect()`.
+  `msSinceLastPrint` son los ms desde que resolvió el último `print()`, `0` si había uno en curso
+  (ese `print()` ya rechazó con `PRINT_FAILED`) o `null` si no hubo ninguno en esta conexión.
+  En Android/Bluetooth el sistema tarda 5-20 s en dar el enlace por caído, así que un apagado a
+  mitad de ticket casi siempre llega aquí después de que `print()` resolvió: úsalo para avisar que
+  el último ticket pudo salir incompleto.
 
 ### Tipos
 
