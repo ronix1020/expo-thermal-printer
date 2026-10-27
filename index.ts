@@ -210,6 +210,21 @@ export function addPrintProgressListener(
   return ThermalPrinterModule.addListener("onPrintProgress", listener);
 }
 
+/** `msSinceLastPrint`: ms desde que resolvió el último `print()`; 0 si había uno en curso (ese ya rechazó); null si no hubo. */
+export interface ConnectionLost {
+  msSinceLastPrint: number | null;
+}
+
+/**
+ * Avisa cuando el enlace con la impresora cae solo (impresora apagada, fuera de alcance), no por `disconnect()`.
+ * En Android/Bluetooth llega 5-20 s después de la caída, casi siempre después de que `print()` resolvió.
+ */
+export function addConnectionLostListener(
+  listener: (event: ConnectionLost) => void
+): { remove(): void } {
+  return ThermalPrinterModule.addListener("onConnectionLost", listener);
+}
+
 export async function isConnected(): Promise<boolean> {
   return await ThermalPrinterModule.isConnected();
 }

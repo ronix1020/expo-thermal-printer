@@ -51,6 +51,8 @@ class ThermalPrinterModule : Module() {
     // si el enlace cae mientras esperan, se rechazan (ver watchLink).
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val drains = HashMap<Runnable, Promise>()
+    // elapsedRealtime() del último print() de Bluetooth que resolvió en esta conexión, para onConnectionLost.
+    @Volatile private var lastPrintDoneAt: Long? = null
 
     companion object {
         // BluetoothSocket.write() vuelve cuando el stack Bluetooth de Android tiene los bytes en
@@ -133,7 +135,8 @@ class ThermalPrinterModule : Module() {
         Name("ThermalPrinter")
 
         // { sent, total } en bytes mientras se imprime (en Bluetooth es estimado, ver print).
-        Events("onPrintProgress")
+        // { msSinceLastPrint: number | null } cuando el enlace Bluetooth cae solo (no por disconnect()).
+        Events("onPrintProgress", "onConnectionLost")
 
         OnDestroy {
             io.execute { closeTransport() }
@@ -217,6 +220,7 @@ class ThermalPrinterModule : Module() {
                     }
                     btSocket = socket
                     currentConnectionType = "bluetooth"
+                    lastPrintDoneAt = null
                     watchLink(socket)
                     promise.resolve(null)
                 } catch (e: Exception) {
@@ -571,14 +575,14 @@ class ThermalPrinterModule : Module() {
                             promise.resolve(null)
                             return@execute
                         }
-                        val out = btSocket?.outputStream ?: throw IOException("Printer disconnected")
+                        val out = btSocket?.outputStream ?: throw IOException("no socket")
                         out.write(finalData)
                         out.flush()
                     } catch (e: Exception) {
                         logTx("write falló tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms: ${e.message}")
                         // Socket roto (p.ej. impresora apagada): se cierra para que isConnected() dé false.
                         closeTransport()
-                        promise.reject("PRINT_FAILED", e.message ?: "Failed to send data", e)
+                        promise.reject("PRINT_FAILED", "Printer disconnected: ${e.message}", e)
                         return@execute
                     }
                     logTx("write BT tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
@@ -592,6 +596,7 @@ class ThermalPrinterModule : Module() {
                             val elapsed = android.os.SystemClock.elapsedRealtime() - drainStartedAt
                             if (elapsed >= drainMs) {
                                 drains.remove(this)
+                                lastPrintDoneAt = android.os.SystemClock.elapsedRealtime()
                                 sendProgress(total, total)
                                 promise.resolve(null)
                                 return
@@ -633,11 +638,17 @@ class ThermalPrinterModule : Module() {
                     android.util.Log.w(LOG_TAG, "Bluetooth link lost")
                     closeTransport()
                     mainHandler.post {
+                        // Android tarda 5-20 s en dar el enlace por caído (supervision timeout), así que casi
+                        // siempre llega después de que print() resolvió: el evento avisa a la app igual.
+                        val printing = drains.isNotEmpty()
                         for ((tick, promise) in drains) {
                             mainHandler.removeCallbacks(tick)
                             promise.reject("PRINT_FAILED", "Printer disconnected during print", null)
                         }
                         drains.clear()
+                        val msSinceLastPrint = if (printing) 0L
+                            else lastPrintDoneAt?.let { android.os.SystemClock.elapsedRealtime() - it }
+                        sendEvent("onConnectionLost", mapOf("msSinceLastPrint" to msSinceLastPrint))
                     }
                 }
             }
