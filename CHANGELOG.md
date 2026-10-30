@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.0
+
+- El acomodo del texto se hace en JavaScript (`src/layout.ts`), una sola vez para Android
+  e iOS. El nativo recibe las líneas ya cortadas; `table` y `two-columns` le llegan como `text`.
+- `text`: si no cabe, se corta por palabras al ancho real (cuenta `xlarge` y la fuente B).
+  Una palabra más larga que la línea sí se parte. Antes la impresora cortaba a mitad de palabra.
+- `table`: cada celda se corta por palabras dentro de su columna; las demás celdas de la fila
+  rellenan con espacios. Si `columnWidths` se pasan del ancho, el recorte se reparte entre
+  todas las columnas (antes aplastaba la última) y sale un aviso en la consola.
+- `two-columns`: si no cabe, la izquierda se parte por palabras y la derecha va alineada a la
+  derecha en la última línea, o en una línea propia si no hay espacio. Antes bajaba a la
+  izquierda.
+- `pc850`, `windows-1252`, `iso-8859-1`, `cp1258`, `ascii` y `unaccent: true`: los caracteres
+  que la tabla no trae se cambian por un equivalente (`—` → `-`, `…` → `...`, `“` → `"`,
+  `€` → `EUR`...) o pierden el acento. Si no hay equivalente, sale `?` y un `console.warn`.
+  Antes salían como `?` (o se borraban con `unaccent`).
+- `gbk`: los caracteres de doble byte cuentan dos columnas al cortar.
+- Android: `print()` rechaza con `ALREADY_PRINTING` si el anterior no resolvió, igual que iOS.
+- `npm test` corre las pruebas del acomodo.
+- La API JS no cambia.
+
 ## 1.7.0
 
 - Android: se elimina el SDK propietario de XPrinter (`posprinterconnectandsendsdk.jar`).

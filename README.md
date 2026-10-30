@@ -225,9 +225,9 @@ await ThermalPrinter.disconnect(); // siempre resuelve, aunque no hubiera conexi
 
 | `type` | Campos | Para qué |
 |---|---|---|
-| `text` | `content` | Texto libre; usa `\n` para varias líneas. |
-| `two-columns` | `content: [izq, der]` o `left` + `right` | Una línea con un texto a cada lado (p. ej. `Total ........ $5`). |
-| `table` | `content`, `columnWidths`, `tableHeader?`, `columnAlignment?` | Filas en columnas; los textos largos se parten en varias líneas. |
+| `text` | `content` | Texto libre; usa `\n` para varias líneas. Lo que no cabe pasa a la línea siguiente por palabras. |
+| `two-columns` | `content: [izq, der]` o `left` + `right` | Una línea con un texto a cada lado (p. ej. `Total ........ $5`). Si no caben, la izquierda se parte por palabras y la derecha queda a la derecha en la última línea. |
+| `table` | `content`, `columnWidths`, `tableHeader?`, `columnAlignment?` | Filas en columnas; los textos largos se parten por palabras dentro de su celda. |
 | `divider` | `charToUse` (o `char` / `content`), `marginVertical?` | Una línea completa con un carácter (`-` por defecto). |
 | `qr` | `content`, `style.size` (1–16, por defecto 6) | Código QR nativo de la impresora. |
 | `image` | `content` (base64 o URL `http(s)`), `style.width` / `style.height` | Logos, firmas, etc. |
@@ -251,6 +251,8 @@ await ThermalPrinter.disconnect(); // siempre resuelve, aunque no hubiera conexi
 |---|---|---|
 | ≤ caracteres del papel (32 en 58 mm, 48 en 80 mm) | **caracteres** exactos por columna | `[14, 3, 7, 8]` |
 | mayor | **porcentajes** del ancho | `[60, 15, 25]` |
+
+Entre columnas va un espacio, así que los caracteres exactos deben sumar como mucho el ancho menos `columnas − 1` (30 para 3 columnas en 58 mm). Si se pasan, el recorte se reparte entre todas y sale un aviso en la consola.
 
 ### Imágenes
 
@@ -294,6 +296,8 @@ Alias aceptados: `utf8` → `utf-8`; `iso8859_1`, `iso88591`, `latin1` → `iso-
 > [!TIP]
 > `unaccent: true` quita los acentos en JavaScript antes de enviar (`á` → `a`, `ñ` → `n`). Es la salida más rápida si tu impresora no tiene una tabla con acentos.
 
+Con `'pc850'`, `'windows-1252'`, `'iso-8859-1'`, `'cp1258'`, `'ascii'` o `unaccent: true`, lo que la tabla no trae se cambia por un equivalente: `— – −` → `-`, `…` → `...`, `‘ ’` → `'`, `“ ”` → `"`, `•` → `*`, `→` → `->`, `€` → `EUR` (en `windows-1252` el `€` y las comillas sí existen y no se tocan). Una letra con un acento que la tabla no tiene sale sin el acento. Si no hay equivalente, sale `?` y un aviso en la consola. `'utf-8'`, `'gbk'`, `'userfont'` y `'raster'` imprimen el texto tal cual.
+
 <details>
 <summary><b>Detalles de <code>userfont</code> y <code>raster</code></b></summary>
 
@@ -318,7 +322,7 @@ Alias aceptados: `utf8` → `utf-8`; `iso8859_1`, `iso88591`, `latin1` → `iso-
 | `encoding` | `'utf-8'` | Ver la tabla de arriba. |
 | `lineSpacing` | `30` | Espacio entre líneas, en puntos. |
 | `feedLines` | `0` | Líneas en blanco al final del ticket. |
-| `unaccent` | `false` | Quita acentos antes de enviar. |
+| `unaccent` | `false` | Quita acentos antes de enviar (y cambia los símbolos que no son ASCII por su equivalente). |
 
 ---
 
@@ -490,7 +494,7 @@ try {
 | `NOT_CONNECTED` | (Android) Llamaste a `print()` sin conectar. | Llama a `connect()` / `connectUsb()` primero. |
 | `PRINT_FAILED` | Se cortó la conexión mientras se enviaba el ticket. | Reconecta y reimprime; avisa que el ticket pudo salir incompleto. |
 | `SERVICE_NOT_BOUND` | (iOS) Llamaste a `print()` sin una conexión lista; equivale a `NOT_CONNECTED`. | Conecta de nuevo. |
-| `ALREADY_PRINTING` | (iOS) Llamaste a `print()` mientras otro seguía enviándose. | Espera a que termine el anterior. |
+| `ALREADY_PRINTING` | Llamaste a `print()` mientras otro seguía enviándose. | Espera a que termine el anterior. |
 | `ALREADY_SCANNING` | (Android) Llamaste a `scanDevices('all')` dos veces seguidas. | Espera a que termine el primer escaneo. |
 | `PERMISSION_DENIED` | (Android) El usuario rechazó el permiso USB. | Vuelve a llamar a `connectUsb()`. |
 

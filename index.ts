@@ -5,6 +5,7 @@
 // Expo modules create a native module accessible via requireNativeModule.
 
 import { requireNativeModule } from "expo-modules-core";
+import { layoutItems } from "./src/layout";
 
 const ThermalPrinterModule = requireNativeModule("ThermalPrinter");
 
@@ -129,13 +130,6 @@ export interface PrintOptions {
   unaccent?: boolean;
 }
 
-const normalizeText = (text: string) => {
-  return text
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\x20-\x7E\n]/g, ""); // Keep printable ASCII and newlines
-};
-
 export async function scanDevices(type: 'paired' | 'all' = 'paired'): Promise<Device[]> {
   return await ThermalPrinterModule.scanDevices(type);
 }
@@ -156,42 +150,14 @@ export async function print(
   items: PrinterItem[],
   options: PrintOptions = {}
 ): Promise<void> {
-  let itemsToPrint = items;
-
-  if (options.unaccent) {
-    itemsToPrint = items.map(item => {
-      const newItem = { ...item };
-      
-      if (newItem.type === 'text') {
-        newItem.content = normalizeText(newItem.content);
-      } else if (newItem.type === 'two-columns') {
-        // Canonical [left, right] and the left/right aliases are both normalized.
-        if (newItem.content) {
-          newItem.content = [normalizeText(newItem.content[0]), normalizeText(newItem.content[1])];
-        }
-        if (typeof newItem.left === 'string') newItem.left = normalizeText(newItem.left);
-        if (typeof newItem.right === 'string') newItem.right = normalizeText(newItem.right);
-      } else if (newItem.type === 'table') {
-        if (newItem.tableHeader) {
-          newItem.tableHeader = newItem.tableHeader.map(h => normalizeText(h));
-        }
-        newItem.content = newItem.content.map(row => row.map(cell => normalizeText(cell)));
-      } else if (newItem.type === 'divider') {
-        // charToUse plus the char/content aliases are all normalized.
-        if (newItem.charToUse) newItem.charToUse = normalizeText(newItem.charToUse);
-        if (newItem.char) newItem.char = normalizeText(newItem.char);
-        if (typeof newItem.content === 'string') newItem.content = normalizeText(newItem.content);
-      }
-      // We generally don't normalize QR codes or Images as they are data/binary
-      
-      return newItem;
-    });
-  }
+  const width = options.width || 58;
+  const encoding = options.encoding || "utf-8";
+  const itemsToPrint = layoutItems(items, { width, encoding, unaccent: options.unaccent });
 
   return await ThermalPrinterModule.print(
     itemsToPrint,
-    options.width || 58,
-    options.encoding || "utf-8",
+    width,
+    encoding,
     options.lineSpacing || 30,
     options.feedLines || 0
   );
