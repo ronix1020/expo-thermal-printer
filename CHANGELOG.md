@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.1
+
+- iOS/BLE: todo el envío corre en la cola principal, la misma de los callbacks de CoreBluetooth.
+  Antes `write()` arrancaba en la cola de Expo mientras `peripheralIsReady`/`didWriteValueFor`
+  seguían en la principal; los dos tocaban la lista de chunks y podían mandarlos duplicados o en
+  otro orden. En `userfont` eso corría la tabla de caracteres (`ESC &`) y el ticket salía con
+  basura (1 de 7 impresiones en una SAT AF330).
+- iOS/BLE: log en Xcode por impresión: bytes, tipo de escritura (withResponse/withoutResponse)
+  y tamaño de chunk.
+- La API JS no cambia.
+
 ## 1.8.0
 
 - El acomodo del texto se hace en JavaScript (`src/layout.ts`), una sola vez para Android

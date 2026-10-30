@@ -81,6 +81,8 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     // Partir el payload en chunks del tamaño máximo permitido por la MTU negociada.
     let mtu = max(1, peripheral.maximumWriteValueLength(for: currentWriteType))
+    NSLog("[ThermalPrinter] BLE write: %d B, %@, chunks de %d B", data.count,
+          currentWriteType == .withResponse ? "withResponse" : "withoutResponse", mtu)
     var chunks: [Data] = []
     var offset = 0
     while offset < data.count {
@@ -333,17 +335,19 @@ public class ThermalPrinterModule: Module {
       }
     }
 
+    // Todo lo de BluetoothManager corre en la cola principal, donde llegan los callbacks de
+    // CoreBluetooth (queue: nil): pendingChunks/writePromise no se tocan desde dos hilos.
     AsyncFunction("scanDevices") { (type: String, promise: Promise) in
       bluetoothManager.scanDevices(promise)
-    }
+    }.runOnQueue(.main)
     
     AsyncFunction("connect") { (uuid: String, promise: Promise) in
       bluetoothManager.connect(uuid, promise)
-    }
+    }.runOnQueue(.main)
     
     AsyncFunction("disconnect") { (promise: Promise) in
       bluetoothManager.disconnect(promise)
-    }
+    }.runOnQueue(.main)
 
     AsyncFunction("print") { (items: [[String: Any]], width: Int, encoding: String, lineSpacing: Int, feedLines: Int, promise: Promise) in
       var bytes: [UInt8] = []
@@ -500,8 +504,10 @@ public class ThermalPrinterModule: Module {
           bytes.append(contentsOf: PrinterUtils.getFeedLinesCmd(feedLines))
       }
       
+      // Los bytes se arman fuera del hilo principal (raster pesa); el envío va a la cola principal.
       let data = Data(bytes)
-      bluetoothManager.write(data, promise)
+      let manager = bluetoothManager
+      DispatchQueue.main.async { manager.write(data, promise) }
     }
   }
 }
