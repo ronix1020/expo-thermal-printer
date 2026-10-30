@@ -34,6 +34,7 @@ await ThermalPrinter.print([
 - [Errores](#-errores)
 - [Cómo funciona por dentro](#-cómo-funciona-por-dentro)
 - [Diagnóstico](#-diagnóstico)
+- [Desarrollo](#-desarrollo)
 
 ---
 
@@ -52,7 +53,7 @@ await ThermalPrinter.print([
 | `connectUsb()` e `isConnected()` | ✅ | ❌ no existen todavía |
 
 - **Sin SDK de terceros:** desde la 1.7.0 la conexión es código propio; ya no hace falta el `.jar` de XPrinter.
-- **Mismo payload en las dos plataformas:** el mismo arreglo de bloques produce el mismo ticket.
+- **Mismo ticket en las dos plataformas:** el acomodo del texto (cortes por palabra, tablas, dos columnas, equivalentes de caracteres) se calcula una sola vez en JavaScript, así que Android e iOS cortan igual.
 - **Errores con código estable** (`PRINT_FAILED`, `NOT_CONNECTED`…) para que los traduzcas en tu app.
 
 ---
@@ -233,6 +234,15 @@ await ThermalPrinter.disconnect(); // siempre resuelve, aunque no hubiera conexi
 | `image` | `content` (base64 o URL `http(s)`), `style.width` / `style.height` | Logos, firmas, etc. |
 | `feed` | `lines` (por defecto 1) | Líneas en blanco, útil antes del corte. |
 
+### Cuántos caracteres caben por línea
+
+| Papel | Fuente A (`primary`) | Fuente B (`secondary`) |
+|---|:---:|:---:|
+| 58 mm | 32 | 42 |
+| 80 mm | 48 | 64 |
+
+`size: 'xlarge'` (doble ancho) deja la mitad; `'large'` es solo doble alto y no cambia el ancho. En `gbk` cada carácter chino ocupa dos columnas. `userfont` y `raster` usan siempre las columnas de la fuente A.
+
 ### Estilos (`style`)
 
 | Propiedad | Valores | Notas |
@@ -253,6 +263,10 @@ await ThermalPrinter.disconnect(); // siempre resuelve, aunque no hubiera conexi
 | mayor | **porcentajes** del ancho | `[60, 15, 25]` |
 
 Entre columnas va un espacio, así que los caracteres exactos deben sumar como mucho el ancho menos `columnas − 1` (30 para 3 columnas en 58 mm). Si se pasan, el recorte se reparte entre todas y sale un aviso en la consola.
+
+- El texto largo de una celda se parte por palabras dentro de su columna; las otras celdas de la fila se rellenan con espacios para que todo quede alineado.
+- Una fila con todas las celdas vacías no imprime nada. Para dejar espacio usa `{ type: 'feed' }`.
+- `style` no aplica a las tablas: salen en tamaño normal, sin negrita.
 
 ### Imágenes
 
@@ -494,7 +508,7 @@ try {
 | `NOT_CONNECTED` | (Android) Llamaste a `print()` sin conectar. | Llama a `connect()` / `connectUsb()` primero. |
 | `PRINT_FAILED` | Se cortó la conexión mientras se enviaba el ticket. | Reconecta y reimprime; avisa que el ticket pudo salir incompleto. |
 | `SERVICE_NOT_BOUND` | (iOS) Llamaste a `print()` sin una conexión lista; equivale a `NOT_CONNECTED`. | Conecta de nuevo. |
-| `ALREADY_PRINTING` | Llamaste a `print()` mientras otro seguía enviándose. | Espera a que termine el anterior. |
+| `ALREADY_PRINTING` | Llamaste a `print()` mientras otro seguía enviándose (en Android/Bluetooth, hasta que termina la espera estimada). | Haz `await` del `print()` anterior antes de mandar el siguiente. |
 | `ALREADY_SCANNING` | (Android) Llamaste a `scanDevices('all')` dos veces seguidas. | Espera a que termine el primer escaneo. |
 | `PERMISSION_DENIED` | (Android) El usuario rechazó el permiso USB. | Vuelve a llamar a `connectUsb()`. |
 
@@ -519,11 +533,24 @@ La librería lee el socket todo el tiempo y se entera de la caída en cuanto And
 </details>
 
 <details>
+<summary><b>Acomodo del texto</b></summary>
+
+Antes de llamar al módulo nativo, `print()` pasa los bloques por `src/layout.ts`:
+
+1. Cambia los caracteres que el encoding no trae por su equivalente (ver [encodings](#-acentos-y-encodings-cuál-uso)).
+2. Corta cada `text` por palabras al ancho de la línea.
+3. Convierte `table` y `two-columns` en `text` con las líneas ya armadas.
+
+El nativo solo codifica y envía esas líneas, así que Android e iOS imprimen lo mismo.
+
+</details>
+
+<details>
 <summary><b>Transporte</b></summary>
 
 - **Android · Bluetooth:** `BluetoothSocket` SPP (`00001101-0000-1000-8000-00805F9B34FB`) en un hilo propio, para no bloquear a los demás módulos de Expo.
 - **Android · USB:** `UsbManager` + `bulkTransfer` al endpoint de salida, en bloques de 16 KB. Acepta cualquier marca que se presente como impresora.
-- **iOS · BLE:** CoreBluetooth; los datos se parten según la MTU y se envían respetando el control de flujo (con confirmación cuando la impresora lo soporta).
+- **iOS · BLE:** CoreBluetooth; los datos se parten según la MTU y se envían respetando el control de flujo (con confirmación cuando la impresora lo soporta). Todo el envío corre en la cola principal, la misma de los callbacks de CoreBluetooth, para que los bloques no se desordenen.
 
 </details>
 
@@ -540,6 +567,25 @@ adb shell setprop log.tag.ThermalPrinter ""        # apagar
 ```
 
 Viene apagado por defecto para que los datos del ticket no queden en el log.
+
+En iOS, cada impresión deja en la consola de Xcode una línea con el tamaño, el tipo de escritura BLE y el tamaño de cada bloque:
+
+```
+[ThermalPrinter] BLE write: <bytes> B, withResponse | withoutResponse, chunks de <n> B
+```
+
+En las dos plataformas, la consola de Metro muestra un `console.warn('[ThermalPrinter] ...')` cuando un carácter no tiene equivalente en el encoding o cuando `columnWidths` se pasan del ancho.
+
+---
+
+## 🧪 Desarrollo
+
+```bash
+npm install
+npm test     # pruebas del acomodo del texto (src/__tests__), sin dispositivo
+```
+
+Los cambios nativos se prueban compilando una app con development build que use la librería.
 
 ---
 
