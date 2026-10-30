@@ -53,6 +53,8 @@ class ThermalPrinterModule : Module() {
     private val drains = HashMap<Runnable, Promise>()
     // elapsedRealtime() del último print() de Bluetooth que resolvió en esta conexión, para onConnectionLost.
     @Volatile private var lastPrintDoneAt: Long? = null
+    // Igual que iOS: un segundo print() mientras el primero no resolvió se rechaza con ALREADY_PRINTING.
+    @Volatile private var printing = false
 
     companion object {
         // BluetoothSocket.write() vuelve cuando el stack Bluetooth de Android tiene los bytes en
@@ -295,6 +297,10 @@ class ThermalPrinterModule : Module() {
                 promise.reject("NOT_CONNECTED", "Printer is not connected. Call connect() first.", null)
                 return@AsyncFunction
             }
+            if (printing) {
+                promise.reject("ALREADY_PRINTING", "A previous print is still in progress", null)
+                return@AsyncFunction
+            }
 
             try {
                 val commands = ArrayList<ByteArray>()
@@ -341,38 +347,18 @@ class ThermalPrinterModule : Module() {
                     // 1. Alignment
                     val align = style["align"] as? String ?: "left"
 
-                    // Raster: se reusa el acomodo en columnas de los helpers de texto y se dibuja; QR e imagen siguen nativos.
+                    // Raster: el texto (table y two-columns llegan ya como text desde src/layout.ts) se dibuja; QR e imagen siguen nativos.
                     if (raster != null) {
                         val bold = style["bold"] as? Boolean ?: false
                         val size = resolveSize(style["size"])
                         when (type) {
                             "text" -> { raster.addText(content, bold, size, align); continue }
-                            "table" -> {
-                                val header = item["tableHeader"] as? List<String> ?: emptyList()
-                                val columnWidths = item["columnWidths"] as? List<Number> ?: emptyList()
-                                val columnAlignment = item["columnAlignment"] as? List<String> ?: emptyList()
-                                val contentList = item["content"] as? List<List<String>> ?: emptyList()
-                                if (columnWidths.isNotEmpty()) {
-                                    val table = getTableCmd(header, columnWidths, columnAlignment, contentList, width, Charsets.UTF_8)
-                                    raster.addText(String(table, Charsets.UTF_8).removeSuffix("\n"), false, 0, "left")
-                                }
-                                continue
-                            }
                             "divider" -> {
                                 val charToUse = (item["charToUse"] ?: item["char"] ?: item["content"]) as? String ?: "-"
                                 val marginVertical = (item["marginVertical"] as? Number)?.toInt() ?: 0
                                 raster.addFeed(marginVertical)
                                 raster.addText(String(getDividerCmd(charToUse, width, Charsets.UTF_8), Charsets.UTF_8).removeSuffix("\n"), false, 0, "left")
                                 raster.addFeed(marginVertical)
-                                continue
-                            }
-                            "two-columns" -> {
-                                val contentList = item["content"] as? List<String>
-                                    ?: listOfNotNull(item["left"] as? String, item["right"] as? String)
-                                if (contentList.size >= 2) {
-                                    val line = getTwoColumnsCmd(contentList[0], contentList[1], width, Charsets.UTF_8, size, "primary")
-                                    raster.addText(String(line, Charsets.UTF_8), bold, size, "left")
-                                }
                                 continue
                             }
                             "feed" -> { raster.addFeed((item["lines"] as? Number)?.toInt() ?: 1); continue }
@@ -478,16 +464,6 @@ class ThermalPrinterModule : Module() {
                                 android.util.Log.e("ThermalPrinter", "Error processing image: ${e.message}")
                             }
                         }
-                        "table" -> {
-                            val header = item["tableHeader"] as? List<String> ?: emptyList()
-                            val columnWidths = item["columnWidths"] as? List<Number> ?: emptyList()
-                            val columnAlignment = item["columnAlignment"] as? List<String> ?: emptyList()
-                            val contentList = item["content"] as? List<List<String>> ?: emptyList()
-                            
-                            if (columnWidths.isNotEmpty()) {
-                                commands.add(getTableCmd(header, columnWidths, columnAlignment, contentList, width, charset))
-                            }
-                        }
                         "feed" -> {
                             val n = (item["lines"] as? Number)?.toInt() ?: 1
                             commands.add(getFeedLinesCmd(n))
@@ -505,33 +481,6 @@ class ThermalPrinterModule : Module() {
                             
                             if (marginVertical > 0) {
                                 commands.add(getFeedLinesCmd(marginVertical))
-                            }
-                        }
-                        "two-columns" -> {
-                            // Accept canonical content:[l,r] plus left/right aliases.
-                            val contentList = item["content"] as? List<String>
-                                ?: listOfNotNull(item["left"] as? String, item["right"] as? String)
-                            if (contentList.size >= 2) {
-                                val leftText = contentList[0]
-                                val rightText = contentList[1]
-
-                                // Apply styles
-                                val bold = style["bold"] as? Boolean ?: false
-                                commands.add(getBoldCmd(bold))
-
-                                val size = resolveSize(style["size"])
-                                commands.add(getTextSizeCmd(size))
-                                
-                                val font = style["font"] as? String ?: "primary"
-                                commands.add(getFontCmd(font))
-                                
-                                commands.add(getTwoColumnsCmd(leftText, rightText, width, charset, size, font))
-                                commands.add(byteArrayOf(0x0A))
-                                
-                                // Reset styles
-                                commands.add(getBoldCmd(false))
-                                commands.add(getTextSizeCmd(0))
-                                commands.add(getFontCmd("primary"))
                             }
                         }
                         else -> {
@@ -556,6 +505,7 @@ class ThermalPrinterModule : Module() {
                 logTxDump(finalData, width, encoding, currentConnectionType)
                 val txStartedAt = android.os.SystemClock.elapsedRealtime()
 
+                printing = true
                 io.execute {
                     val total = finalData.size
                     try {
@@ -572,6 +522,7 @@ class ThermalPrinterModule : Module() {
                                 sendProgress(offset, total)
                             }
                             logTx("write USB tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms")
+                            printing = false
                             promise.resolve(null)
                             return@execute
                         }
@@ -582,6 +533,7 @@ class ThermalPrinterModule : Module() {
                         logTx("write falló tras ${android.os.SystemClock.elapsedRealtime() - txStartedAt} ms: ${e.message}")
                         // Socket roto (p.ej. impresora apagada): se cierra para que isConnected() dé false.
                         closeTransport()
+                        printing = false
                         promise.reject("PRINT_FAILED", "Printer disconnected: ${e.message}", e)
                         return@execute
                     }
@@ -597,6 +549,7 @@ class ThermalPrinterModule : Module() {
                             if (elapsed >= drainMs) {
                                 drains.remove(this)
                                 lastPrintDoneAt = android.os.SystemClock.elapsedRealtime()
+                                printing = false
                                 sendProgress(total, total)
                                 promise.resolve(null)
                                 return
@@ -611,6 +564,7 @@ class ThermalPrinterModule : Module() {
                     }
                 }
             } catch (e: Exception) {
+                printing = false
                 promise.reject("PRINT_FAILED", e.message, e)
             }
         }
@@ -640,13 +594,14 @@ class ThermalPrinterModule : Module() {
                     mainHandler.post {
                         // Android tarda 5-20 s en dar el enlace por caído (supervision timeout), así que casi
                         // siempre llega después de que print() resolvió: el evento avisa a la app igual.
-                        val printing = drains.isNotEmpty()
+                        val wasPrinting = drains.isNotEmpty()
                         for ((tick, promise) in drains) {
                             mainHandler.removeCallbacks(tick)
                             promise.reject("PRINT_FAILED", "Printer disconnected during print", null)
                         }
                         drains.clear()
-                        val msSinceLastPrint = if (printing) 0L
+                        printing = false
+                        val msSinceLastPrint = if (wasPrinting) 0L
                             else lastPrintDoneAt?.let { android.os.SystemClock.elapsedRealtime() - it }
                         sendEvent("onConnectionLost", mapOf("msSinceLastPrint" to msSinceLastPrint))
                     }
@@ -756,123 +711,6 @@ fun logTxDump(data: ByteArray, width: Int, encoding: String, transport: String?)
 fun logTx(message: String) {
     if (!android.util.Log.isLoggable(LOG_TAG, android.util.Log.VERBOSE)) return
     android.util.Log.v(LOG_TAG, message)
-}
-
-fun getTableCmd(header: List<String>, columnWidths: List<Number>, columnAlignment: List<String>, content: List<List<String>>, printerWidth: Int, charset: java.nio.charset.Charset): ByteArray {
-    val stream = ByteArrayOutputStream()
-    
-    // Calculate max chars per line
-    // 58mm (384 dots) -> ~32 chars (Font A 12x24)
-    // 80mm (576 dots) -> ~48 chars (Font A 12x24)
-    // 48mm (288 dots) -> ~24 chars (Font A 12x24)
-    val maxChars = when {
-        printerWidth >= 80 -> 48
-        printerWidth >= 58 -> 32
-        else -> 24
-    }
-    
-    // Calculate spacing
-    val numColumns = columnWidths.size
-    val totalSpacing = if (numColumns > 1) numColumns - 1 else 0
-    val availableChars = maxChars - totalSpacing
-
-    // Disambiguate columnWidths:
-    //  - If the values sum to <= the paper's char width, treat them as ABSOLUTE
-    //    char counts (use as-is, then fit to the available space).
-    //  - Otherwise treat them as PERCENTAGES of the available width.
-    val requestedSum = columnWidths.sumOf { it.toInt() }
-    val colChars = if (requestedSum <= maxChars) {
-        columnWidths.map { it.toInt() }.toMutableList()
-    } else {
-        columnWidths.map { (it.toDouble() / 100.0 * availableChars).toInt() }.toMutableList()
-    }
-
-    // Shrink from the last columns if we overflow the available space.
-    var total = colChars.sum()
-    var idx = colChars.lastIndex
-    while (total > availableChars && idx >= 0) {
-        val reducible = minOf(colChars[idx], total - availableChars)
-        colChars[idx] -= reducible
-        total -= reducible
-        idx--
-    }
-    // Adjust last column to fill remaining space due to rounding/absolute slack.
-    if (total < availableChars && colChars.isNotEmpty()) {
-        colChars[colChars.lastIndex] += (availableChars - total)
-    }
-
-    // Helper to print a row
-    fun printRow(row: List<String>) {
-        // We need to handle wrapping. A row might span multiple lines.
-        // Split each cell into lines based on col width
-        val cellLines = row.mapIndexed { index, text ->
-            val width = if (index < colChars.size) colChars[index] else 0
-            if (width > 0) splitText(text, width) else listOf("")
-        }
-        
-        // Find max lines in this row
-        val maxLines = cellLines.maxOfOrNull { it.size } ?: 0
-        
-        for (i in 0 until maxLines) {
-            for (j in 0 until colChars.size) {
-                val width = colChars[j]
-                val lines = if (j < cellLines.size) cellLines[j] else emptyList()
-                val text = if (i < lines.size) lines[i] else ""
-                val align = if (j < columnAlignment.size) columnAlignment[j] else "left"
-                
-                // Pad text with spaces based on alignment
-                val paddedText = when (align) {
-                    "right" -> text.padStart(width)
-                    "center" -> {
-                        val totalSpaces = width - text.length
-                        if (totalSpaces <= 0) text
-                        else {
-                            val leftSpaces = totalSpaces / 2
-                            val rightSpaces = totalSpaces - leftSpaces
-                            " ".repeat(leftSpaces) + text + " ".repeat(rightSpaces)
-                        }
-                    }
-                    else -> text.padEnd(width) // left
-                }
-                
-                // Truncate if somehow longer (shouldn't happen with splitText)
-                val finalText = if (paddedText.length > width) paddedText.substring(0, width) else paddedText
-                
-                stream.write(finalText.toByteArray(charset))
-                
-                // Add spacing if not last column
-                if (j < colChars.size - 1) {
-                    stream.write(" ".toByteArray(charset))
-                }
-            }
-            stream.write(byteArrayOf(0x0A)) // New line
-        }
-    }
-
-    // Print Header
-    if (header.isNotEmpty()) {
-        printRow(header)
-    }
-    
-    // Print Content
-    for (row in content) {
-        printRow(row)
-    }
-    
-    return stream.toByteArray()
-}
-
-fun splitText(text: String, width: Int): List<String> {
-    val result = ArrayList<String>()
-    var current = text
-    while (current.length > width) {
-        result.add(current.substring(0, width))
-        current = current.substring(width)
-    }
-    if (current.isNotEmpty()) {
-        result.add(current)
-    }
-    return result
 }
 
 fun getFeedLinesCmd(n: Int): ByteArray {
@@ -1009,45 +847,6 @@ fun getDividerCmd(charToUse: String, printerWidth: Int, charset: java.nio.charse
     val char = if (charToUse.isNotEmpty()) charToUse[0] else '-'
     val line = char.toString().repeat(maxChars)
     return (line + "\n").toByteArray(charset)
-}
-
-fun getTwoColumnsCmd(leftText: String, rightText: String, printerWidth: Int, charset: java.nio.charset.Charset, size: Int, font: String): ByteArray {
-    // Calculate max chars based on width, font and size
-    // Base chars for Font A (12x24)
-    var maxChars = when {
-        printerWidth >= 80 -> 48
-        printerWidth >= 58 -> 32
-        else -> 24
-    }
-    
-    // Adjust for Font B (9x17) - approx 42 chars for 58mm
-    if (font == "secondary") {
-        maxChars = when {
-            printerWidth >= 80 -> 64
-            printerWidth >= 58 -> 42
-            else -> 32
-        }
-    }
-    
-    // Adjust for Size (Width scaling)
-    // GS ! n. Lower 4 bits are height, upper 4 bits are width.
-    // Width multiplier = (n >> 4) + 1.
-    val widthMultiplier = (size shr 4) + 1
-    maxChars /= widthMultiplier
-    
-    val leftLen = leftText.length
-    val rightLen = rightText.length
-    
-    if (leftLen + rightLen >= maxChars) {
-        // If they don't fit, just print them with a single space or wrap?
-        // Simple approach: Left + Space + Right (will wrap naturally)
-        return "$leftText $rightText".toByteArray(charset)
-    }
-    
-    val spaces = maxChars - leftLen - rightLen
-    val spaceStr = " ".repeat(spaces)
-    
-    return "$leftText$spaceStr$rightText".toByteArray(charset)
 }
 
 fun getPrintAndFeedCmd(n: Int): ByteArray {

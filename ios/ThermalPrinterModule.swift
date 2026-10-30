@@ -380,26 +380,13 @@ public class ThermalPrinterModule: Module {
 
           let align = style["align"] as? String ?? "left"
 
-          // Raster: se reusa el acomodo en columnas de los helpers de texto y se dibuja; QR e imagen siguen nativos.
+          // Raster: el texto (table y two-columns llegan ya como text desde src/layout.ts) se dibuja; QR e imagen siguen nativos.
           if let raster = raster {
               let bold = style["bold"] as? Bool ?? false
               let size = PrinterUtils.resolveSize(style["size"])
               switch type {
               case "text":
                   raster.addText(content, bold: bold, size: size, align: align)
-                  continue
-              case "table":
-                  let header = item["tableHeader"] as? [String] ?? []
-                  let columnWidths = item["columnWidths"] as? [NSNumber] ?? []
-                  let columnAlignment = item["columnAlignment"] as? [String] ?? []
-                  let contentList = item["content"] as? [[String]] ?? []
-                  if !columnWidths.isEmpty {
-                      let table = PrinterUtils.getTableCmd(header: header, columnWidths: columnWidths, columnAlignment: columnAlignment,
-                                                           content: contentList, printerWidth: width, encoding: .utf8)
-                      var text = String(decoding: table, as: UTF8.self)
-                      if text.hasSuffix("\n") { text.removeLast() }
-                      raster.addText(text, bold: false, size: 0, align: "left")
-                  }
                   continue
               case "divider":
                   let charToUse = (item["charToUse"] as? String) ?? (item["char"] as? String) ?? (item["content"] as? String) ?? "-"
@@ -408,13 +395,6 @@ public class ThermalPrinterModule: Module {
                   raster.addFeed(marginVertical)
                   raster.addText(String(repeating: String(charToUse.prefix(1)), count: maxChars), bold: false, size: 0, align: "left")
                   raster.addFeed(marginVertical)
-                  continue
-              case "two-columns":
-                  let contentList = (item["content"] as? [String]) ?? [item["left"] as? String, item["right"] as? String].compactMap { $0 }
-                  if contentList.count >= 2 {
-                      let line = PrinterUtils.getTwoColumnsCmd(contentList[0], contentList[1], width, .utf8, size, "primary")
-                      raster.addText(String(decoding: line, as: UTF8.self), bold: bold, size: size, align: "left")
-                  }
                   continue
               case "feed":
                   raster.addFeed((item["lines"] as? NSNumber)?.intValue ?? 1)
@@ -505,49 +485,6 @@ public class ThermalPrinterModule: Module {
                   bytes.append(contentsOf: PrinterUtils.getFeedLinesCmd(marginVertical))
               }
               
-          case "table":
-              let header = item["tableHeader"] as? [String] ?? []
-              let columnWidths = item["columnWidths"] as? [NSNumber] ?? []
-              let columnAlignment = item["columnAlignment"] as? [String] ?? []
-              let contentList = item["content"] as? [[String]] ?? []
-
-              if !columnWidths.isEmpty {
-                  let tableBytes = PrinterUtils.getTableCmd(
-                      header: header,
-                      columnWidths: columnWidths,
-                      columnAlignment: columnAlignment,
-                      content: contentList,
-                      printerWidth: width,
-                      encoding: resolvedEncoding
-                  )
-                  bytes.append(contentsOf: tableBytes)
-              }
-
-          case "two-columns":
-             // Accept canonical content:[l,r] plus left/right aliases.
-             let contentList = (item["content"] as? [String]) ?? [item["left"] as? String, item["right"] as? String].compactMap { $0 }
-             if contentList.count >= 2 {
-                 let left = contentList[0]
-                 let right = contentList[1]
-
-                 let bold = style["bold"] as? Bool ?? false
-                 bytes.append(contentsOf: PrinterUtils.getBoldCmd(bold))
-
-                 let size = PrinterUtils.resolveSize(style["size"])
-                 bytes.append(contentsOf: PrinterUtils.getTextSizeCmd(size))
-
-                 let font = style["font"] as? String ?? "primary"
-                 bytes.append(contentsOf: PrinterUtils.getFontCmd(font))
-
-                 bytes.append(contentsOf: PrinterUtils.getTwoColumnsCmd(left, right, width, resolvedEncoding, size, font))
-                 bytes.append(0x0A)
-
-                 // Reset
-                 bytes.append(contentsOf: PrinterUtils.getBoldCmd(false))
-                 bytes.append(contentsOf: PrinterUtils.getTextSizeCmd(0))
-                 bytes.append(contentsOf: PrinterUtils.getFontCmd("primary"))
-             }
-
           default:
               NSLog("[ThermalPrinter] Unknown item type: \(type)")
           }
