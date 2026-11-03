@@ -320,11 +320,13 @@ Con `'pc850'`, `'windows-1252'`, `'iso-8859-1'`, `'cp1258'`, `'ascii'` o `unacce
 - Fija el área de impresión al ancho completo del papel (576 puntos en 80 mm, 384 en 58 mm).
 - La impresora solo acepta caracteres ASCII como fuente propia. Por eso cada carácter con acento del ticket (`á`, `Ñ`, `°`…) se dibuja en un carácter ASCII que ese ticket no usa. Si se acaban, se imprime sin acento.
 - Siempre usa la fuente A.
+- Cada ticket empieza con 131 bytes NUL antes de reiniciar la impresora. Si el ticket anterior se cortó a mitad de la fuente (por un timeout o un `disconnect()`), esos bytes la completan y el siguiente no sale con las letras cambiadas.
 
 **`raster`**
 - Dibuja el texto, las tablas, los divisores y las dos columnas como imagen, en la misma cuadrícula de caracteres que el modo texto (48 columnas en 80 mm, 32 en 58 mm), así que el acomodo no cambia.
 - Respeta alineación, negrita y tamaño. QR e imágenes se envían como siempre.
 - Por BLE en iOS es especialmente lento.
+- Igual que `userfont`, cada ticket empieza con 1728 bytes NUL que cierran una banda de imagen que haya quedado a medias.
 
 </details>
 
@@ -361,6 +363,8 @@ sub.remove();
 ### Conexión perdida
 
 Si la impresora se apaga o queda fuera de alcance, la librería emite `onConnectionLost`. No se dispara cuando tú llamas a `disconnect()`.
+
+En iOS, si la impresora sigue conectada pero pasa 5 s sin confirmar lo que se le envía, `print()` falla con `PRINT_FAILED` y la librería corta la conexión. En ese caso no se emite `onConnectionLost`: reconecta antes del siguiente ticket.
 
 ```ts
 ThermalPrinter.addConnectionLostListener(({ msSinceLastPrint }) => {
@@ -550,7 +554,7 @@ El nativo solo codifica y envía esas líneas, así que Android e iOS imprimen l
 
 - **Android · Bluetooth:** `BluetoothSocket` SPP (`00001101-0000-1000-8000-00805F9B34FB`) en un hilo propio, para no bloquear a los demás módulos de Expo.
 - **Android · USB:** `UsbManager` + `bulkTransfer` al endpoint de salida, en bloques de 16 KB. Acepta cualquier marca que se presente como impresora.
-- **iOS · BLE:** CoreBluetooth; los datos se parten según la MTU y se envían respetando el control de flujo (con confirmación cuando la impresora lo soporta). Todo el envío corre en la cola principal, la misma de los callbacks de CoreBluetooth, para que los bloques no se desordenen.
+- **iOS · BLE:** CoreBluetooth. Los datos se parten en bloques de un paquete (MTU − 3, unos 182 B) y se envían respetando el control de flujo, con confirmación cuando la impresora lo soporta. No se usan bloques de 512 B: con confirmación, iOS los manda como *long write*, que algunos módulos BLE baratos manejan mal. Todo el envío corre en la cola principal, la misma de los callbacks de CoreBluetooth, para que los bloques no se desordenen.
 
 </details>
 
