@@ -242,8 +242,15 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   private func attemptConnect(_ uuid: String, _ promise: Promise, retriesLeft: Int) {
     switch centralManager.state {
     case .poweredOn:
-      guard let peripheral = discoveredPeripherals.first(where: { $0.identifier.uuidString == uuid }) else {
+      // Conectada no se anuncia y cada scan vacía la lista: si no está, se le pide a iOS.
+      guard let id = UUID(uuidString: uuid),
+            let peripheral = discoveredPeripherals.first(where: { $0.identifier == id })
+              ?? centralManager.retrievePeripherals(withIdentifiers: [id]).first else {
         promise.reject(PrinterException("DEVICE_NOT_FOUND", "Device with UUID \(uuid) not found in scan results"))
+        return
+      }
+      if peripheral == connectedPeripheral && peripheral.state == .connected && writeCharacteristic != nil {
+        promise.resolve(nil)
         return
       }
       connectPromise = promise

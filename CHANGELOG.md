@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.5
+
+- iOS: `connect()` ya no rechaza con `DEVICE_NOT_FOUND` si la impresora no salió en el último
+  escaneo pero el sistema la conoce (por ejemplo, una impresora ya conectada, que deja de
+  anunciarse, tras escanear otra vez). Si ya está conectada a la librería, resuelve sin reconectar.
+- La API JS no cambia.
+
 ## 1.8.4
 
 - Android/Bluetooth: la espera antes de que `print()` resuelva es más larga fuera de `raster`:

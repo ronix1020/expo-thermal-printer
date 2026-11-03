@@ -507,7 +507,7 @@ try {
 | `code` | Cuándo pasa | Qué hacer |
 |---|---|---|
 | `BLUETOOTH_NOT_READY` | Bluetooth apagado, sin permiso o todavía iniciando. | Pide al usuario que lo encienda o revisa los permisos. |
-| `DEVICE_NOT_FOUND` | No apareció la impresora (en iOS: no estaba en el último escaneo) o no hay impresora USB. | Escanea de nuevo o revisa el cable. |
+| `DEVICE_NOT_FOUND` | No apareció la impresora (en iOS: ni en el último escaneo ni entre las que el sistema ya conoce) o no hay impresora USB. | Escanea de nuevo o revisa el cable. |
 | `CONNECTION_FAILED` | La impresora no aceptó la conexión. | ¿Está encendida y cerca? ¿Conectada a otro teléfono? |
 | `NOT_CONNECTED` | (Android) Llamaste a `print()` sin conectar. | Llama a `connect()` / `connectUsb()` primero. |
 | `PRINT_FAILED` | Se cortó la conexión mientras se enviaba el ticket, o (iOS) la impresora pasó 5 s sin confirmar y la librería cortó la conexión. | Reconecta y reimprime; avisa que el ticket pudo salir incompleto. |
