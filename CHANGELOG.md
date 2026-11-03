@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.4
+
+- Android/Bluetooth: la espera antes de que `print()` resuelva es más larga fuera de `raster`:
+  500 ms + bytes / 6 KB/s (antes bytes / 12 KB/s). Un ticket `userfont` de 15 KB con logo y QR
+  salía cortado 1 de cada 3 veces en una SAT AF330 cuando la app desconectaba al resolver: ahora
+  espera ~3 s en vez de ~1.25 s. `raster` sigue a 12 KB/s (+ 500 ms), que es lo medido.
+- Android/Bluetooth: el log VERBOSE dice cuánto se espera y por qué (`drain BT: ...`).
+- No hay confirmación real: la AF330 no responde a `DLE EOT`, `GS I` ni `GS r`.
+
 ## 1.8.3
 
 - Android: `print()` rechazaba con `ERR_UNEXPECTED` ("Value is undefined, expected an Object")

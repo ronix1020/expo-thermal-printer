@@ -358,7 +358,7 @@ sub.remove();
 |---|---|
 | iOS | Real: bytes que la impresora confirmó por BLE. |
 | Android · USB | Real: bytes transferidos. |
-| Android · Bluetooth | **Estimado** a ~12 KB/s. Android no informa cuánto recibió la impresora. |
+| Android · Bluetooth | **Estimado**: 500 ms + ~6 KB/s (~12 KB/s en `raster`). Android no informa cuánto recibió la impresora. |
 
 ### Conexión perdida
 
@@ -523,7 +523,7 @@ try {
 <details>
 <summary><b>¿Por qué en Android/Bluetooth el progreso es estimado?</b></summary>
 
-Android acepta el ticket entero en un buffer del sistema y responde en ~1 ms, aunque sean 100 KB. No hay ninguna API que diga cuánto de eso ya llegó a la impresora. Por eso `print()` espera `tamaño ÷ 12 KB/s` antes de resolver: así, si tu app desconecta justo después, no corta el ticket. El valor viene de medir una SAT AF330 (~16 KB/s) con margen para impresoras más lentas.
+Android acepta el ticket entero en un buffer del sistema y responde en ~1 ms, aunque sean 100 KB. No hay ninguna API que diga cuánto de eso ya llegó a la impresora. Por eso `print()` espera `500 ms + tamaño ÷ 6 KB/s` antes de resolver (`÷ 12 KB/s` en `raster`): así, si tu app desconecta justo después, no corta el ticket. Los valores vienen de una SAT AF330: con raster recibe ~16 KB/s, pero un ticket `userfont` con logo y QR se cortaba a 12 KB/s.
 
 Pedirle el estado a la impresora (`DLE EOT`) tampoco ayuda: la consulta queda en la misma fila detrás del ticket, y muchas impresoras (como la AF330) ni siquiera responden.
 

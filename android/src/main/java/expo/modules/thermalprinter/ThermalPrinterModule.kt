@@ -60,12 +60,17 @@ class ThermalPrinterModule : Module() {
         // BluetoothSocket.write() vuelve cuando el stack Bluetooth de Android tiene los bytes en
         // su buffer (~1 ms aunque sean 106 KB de raster), NO cuando la impresora los recibió, y
         // flush() no espera más. Si la app llama disconnect() justo después, el socket se cierra
-        // antes de drenar y el ticket sale truncado. Esperamos ~ (bytes / DRAIN_BYTES_PER_MS) ms,
-        // sin tope, antes de resolver. También es la velocidad de la barra de progreso.
-        // Medido 2026-10-26: SAT AF330 + moto g75, raster de 76,553 B impreso en 4.5–5 s → ~16 B/ms.
-        // 12 queda ~30% más lento que eso para dar margen a térmicas más lentas. Una sola medición:
-        // si una impresora corta el ticket al desconectar justo después de print(), bajar este valor.
-        private const val DRAIN_BYTES_PER_MS = 12.0
+        // antes de drenar y el ticket sale truncado. Esperamos DRAIN_BASE_MS + bytes / velocidad, sin
+        // tope, antes de resolver. También es la velocidad de la barra de progreso. No se le puede
+        // preguntar a la impresora: la AF330 no responde a DLE EOT / GS I / GS r.
+        // Raster: SAT AF330 + moto g75, 76,553 B impresos en 4.5–5 s → ~16 B/ms; 12 deja ~30% de margen.
+        // Texto/userfont: 2026-11-03, AF330 + S23, un ticket de 14,981 B con logo y QR salió cortado
+        // 1 de 3 veces cerrando a ~1.4 s (12 B/ms). 6 B/ms es el doble de margen. La base cubre la
+        // primera impresión tras conectar, que fue la que se cortó. Si otra impresora corta el
+        // ticket al desconectar justo después de print(), bajar estos valores.
+        private const val DRAIN_BYTES_PER_MS_RASTER = 12.0
+        private const val DRAIN_BYTES_PER_MS = 6.0
+        private const val DRAIN_BASE_MS = 500L
         private const val PROGRESS_TICK_MS = 200L
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val USB_CHUNK = 16384   // máximo de bulkTransfer antes de API 28
@@ -552,7 +557,9 @@ class ThermalPrinterModule : Module() {
                     // En Bluetooth esperamos proporcional al tamaño para que el buffer del stack drene
                     // antes de un disconnect() de la app (ver DRAIN_BYTES_PER_MS). El progreso es ese
                     // mismo estimado: Android no informa cuánto recibió la impresora.
-                    val drainMs = (total / DRAIN_BYTES_PER_MS).toLong()
+                    val rate = if (raster != null) DRAIN_BYTES_PER_MS_RASTER else DRAIN_BYTES_PER_MS
+                    val drainMs = DRAIN_BASE_MS + (total / rate).toLong()
+                    logTx("drain BT: $DRAIN_BASE_MS ms + $total B a $rate B/ms = $drainMs ms")
                     val drainStartedAt = android.os.SystemClock.elapsedRealtime()
                     val tick = object : Runnable {
                         override fun run() {
@@ -565,7 +572,7 @@ class ThermalPrinterModule : Module() {
                                 promise.resolve(null)
                                 return
                             }
-                            sendProgress((elapsed * DRAIN_BYTES_PER_MS).toInt(), total)
+                            sendProgress((total * elapsed / drainMs).toInt(), total)
                             mainHandler.postDelayed(this, PROGRESS_TICK_MS)
                         }
                     }

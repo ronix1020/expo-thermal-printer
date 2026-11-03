@@ -163,7 +163,7 @@ export async function print(
   );
 }
 
-/** Bytes enviados de la impresión en curso. En Android/Bluetooth es un estimado (~12 KB/s). */
+/** Bytes enviados de la impresión en curso. En Android/Bluetooth es un estimado (500 ms + ~6 KB/s; ~12 KB/s en raster). */
 export interface PrintProgress {
   sent: number;
   total: number;
