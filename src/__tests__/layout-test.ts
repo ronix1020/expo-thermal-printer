@@ -107,3 +107,37 @@ describe('transliterate', () => {
     expect(text(layoutItems([{ type: 'text', content: 'ABCDE…' }], { width: 58, encoding: 'pc850' }))).toEqual(['ABCDE...']);
   });
 });
+
+describe('salida para el nativo', () => {
+  // Expo en Kotlin no convierte un Map con valores undefined: el print entero rechaza.
+  const undefinedPaths = (value: unknown, path = ''): string[] =>
+    value === undefined ? [path]
+      : value && typeof value === 'object'
+        ? Object.entries(value).flatMap(([k, v]) => undefinedPaths(v, `${path}.${k}`))
+        : [];
+
+  it('ningún item ni su style trae valores undefined', () => {
+    const items = [
+      { type: 'text', content: 'Hola', style: { align: 'center' } },
+      { type: 'text', content: 'Sin estilo' },
+      { type: 'two-columns', left: 'TOTAL', right: '$1.00' },
+      { type: 'two-columns', content: ['A', 'B'], style: { bold: true } },
+      { type: 'table', columnWidths: [20, 11], content: [['x', 'y']] },
+      { type: 'table', columnWidths: [20, 11], tableHeader: ['A', 'B'], columnAlignment: ['left', 'right'], content: [['x', 'y']] },
+      { type: 'divider', content: '-' },
+      { type: 'divider', charToUse: '=' },
+      { type: 'divider', char: '*', marginVertical: 1 },
+      { type: 'divider' },
+      { type: 'qr', content: 'https://x', style: { size: 6 } },
+      { type: 'image', content: 'aGVsbG8=' },
+      { type: 'feed', lines: 2 },
+      { type: 'feed' },
+    ];
+    for (const encoding of ['pc850', 'utf-8', 'userfont', 'raster']) {
+      for (const unaccent of [false, true]) {
+        const out = layoutItems(items, { width: 80, encoding, unaccent });
+        expect(out.flatMap((item, i) => undefinedPaths(item, `${i}:${item.type}`))).toEqual([]);
+      }
+    }
+  });
+});

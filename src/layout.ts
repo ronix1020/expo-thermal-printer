@@ -213,9 +213,15 @@ export function layoutItems(items: Item[], options: LayoutOptions): Item[] {
         out.push({ type: 'text', content: twoColumnsLines(left, right, cols, cw).join('\n'), style: { ...style, align: 'left' } });
         break;
       }
-      case 'divider':
-        out.push({ ...item, charToUse: fix(item.charToUse), char: fix(item.char), content: fix(item.content) });
+      case 'divider': {
+        // Solo las claves que vinieron: Expo en Kotlin rechaza el item entero si una vale undefined.
+        const divider = { ...item };
+        for (const key of ['charToUse', 'char', 'content']) {
+          if (typeof divider[key] === 'string') divider[key] = fix(divider[key]);
+        }
+        out.push(divider);
         break;
+      }
       default:
         out.push(item);
     }

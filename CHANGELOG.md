@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.3
+
+- Android: `print()` rechazaba con `ERR_UNEXPECTED` ("Value is undefined, expected an Object")
+  cualquier ticket con un `divider`, sin llegar a imprimir. Desde la 1.8.0, el acomodo en JS
+  agregaba `charToUse`, `char` y `content` en `undefined` a cada divider, y Expo en Kotlin no
+  convierte un `Map` con valores `undefined`. Ahora solo se tocan las claves que vinieron.
+- Prueba nueva: ningún item que sale del acomodo trae valores `undefined`, en ningún tipo ni encoding.
+
 ## 1.8.2
 
 - iOS/BLE: los chunks miden lo que cabe en un paquete ATT (MTU − 3, ~182 B) también con
