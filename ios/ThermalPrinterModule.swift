@@ -79,8 +79,10 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     // control de flujo explícito.
     currentWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
 
-    // Partir el payload en chunks del tamaño máximo permitido por la MTU negociada.
-    let mtu = max(1, peripheral.maximumWriteValueLength(for: currentWriteType))
+    // Chunks del tamaño de un paquete ATT (MTU − 3) también en .withResponse: para ese tipo iOS
+    // reporta 512 aunque la MTU sea ~185 y manda cada chunk como long write (Prepare + Execute
+    // Write), que módulos BLE baratos como el de la SAT AF330 manejan mal (ACK que nunca llega).
+    let mtu = max(1, peripheral.maximumWriteValueLength(for: .withoutResponse))
     NSLog("[ThermalPrinter] BLE write: %d B, %@, chunks de %d B", data.count,
           currentWriteType == .withResponse ? "withResponse" : "withoutResponse", mtu)
     var chunks: [Data] = []
@@ -91,11 +93,38 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         offset += len
     }
     pendingChunks = chunks
+    totalChunks = chunks.count
+    writeStartedAt = ProcessInfo.processInfo.systemUptime
     totalBytes = data.count
     sentBytes = 0
     lastPercent = -1
 
     sendPendingChunks()
+  }
+
+  // Si la impresora deja de confirmar (ACK o peripheralIsReady que no llegan), print() quedaría
+  // colgada hasta el timeout de la app. A los STALL_TIMEOUT s sin avance se rechaza y se corta la
+  // conexión: un write en vuelo de CoreBluetooth confundiría los ACK del trabajo siguiente.
+  private static let STALL_TIMEOUT: TimeInterval = 5
+  private var stallWatchdog: DispatchWorkItem?
+  private var totalChunks = 0
+  private var writeStartedAt: TimeInterval = 0
+
+  private func armStallWatchdog() {
+    stallWatchdog?.cancel()
+    let waitStartedAt = ProcessInfo.processInfo.systemUptime
+    let item = DispatchWorkItem { [weak self] in
+      guard let self = self, self.writePromise != nil, let peripheral = self.connectedPeripheral else { return }
+      let chunk = self.totalChunks - self.pendingChunks.count
+      let waitedMs = Int((ProcessInfo.processInfo.systemUptime - waitStartedAt) * 1000)
+      NSLog("[ThermalPrinter] BLE write atascado: chunk %d de %d, %d ms esperando a la impresora; se desconecta",
+            chunk, self.totalChunks, waitedMs)
+      self.failPendingWrite("Printer stopped responding (chunk \(chunk) of \(self.totalChunks))")
+      self.centralManager.cancelPeripheralConnection(peripheral)
+      self.connectedPeripheral = nil
+    }
+    stallWatchdog = item
+    DispatchQueue.main.asyncAfter(deadline: .now() + BluetoothManager.STALL_TIMEOUT, execute: item)
   }
 
   // Envía los chunks pendientes respetando el control de flujo de CoreBluetooth.
@@ -112,6 +141,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         while !pendingChunks.isEmpty {
             if !peripheral.canSendWriteWithoutResponse {
                 // Se reanuda en peripheralIsReady(toSendWriteWithoutResponse:)
+                armStallWatchdog()
                 return
             }
             let chunk = pendingChunks.removeFirst()
@@ -127,11 +157,15 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
         let chunk = pendingChunks.removeFirst()
         inFlightBytes = chunk.count
+        armStallWatchdog()
         peripheral.writeValue(chunk, for: characteristic, type: .withResponse)
     }
   }
 
   private func resolveWrite() {
+    stallWatchdog?.cancel()
+    NSLog("[ThermalPrinter] BLE write OK: %d chunks en %d ms", totalChunks,
+          Int((ProcessInfo.processInfo.systemUptime - writeStartedAt) * 1000))
     writePromise?.resolve(nil)
     writePromise = nil
     lastPrintDoneAt = ProcessInfo.processInfo.systemUptime
@@ -142,9 +176,9 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
      if let error = error {
-         writePromise?.reject(PrinterException("PRINT_FAILED", error.localizedDescription))
-         writePromise = nil
-         pendingChunks.removeAll()
+         NSLog("[ThermalPrinter] BLE write falló en el chunk %d de %d: %@",
+               totalChunks - pendingChunks.count, totalChunks, error.localizedDescription)
+         failPendingWrite(error.localizedDescription)
          return
      }
      // ACK de un chunk .withResponse: enviar el siguiente o resolver al terminar.
@@ -231,6 +265,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   // quede colgada: tras una desconexión no llegarán ni el ACK (.withResponse) ni
   // peripheralIsReady (.withoutResponse) que reanudarían sendPendingChunks().
   private func failPendingWrite(_ reason: String) {
+    stallWatchdog?.cancel()
     if writePromise != nil {
         writePromise?.reject(PrinterException("PRINT_FAILED", reason))
         writePromise = nil
@@ -362,6 +397,13 @@ public class ThermalPrinterModule: Module {
 
       // raster: el texto se dibuja como imagen (ESC *); no depende de fuentes ni encodings de la impresora.
       let raster = PrinterUtils.normalizeEncoding(encoding) == "raster" ? RasterText(printerWidth: width, lineSpacing: lineSpacing) : nil
+
+      // Si el trabajo anterior se cortó a medias (timeout de la app + disconnect), la impresora puede
+      // seguir dentro de un ESC & o ESC * esperando datos y se tragaría el ESC @ y lo que sigue.
+      // Los NUL completan esa definición (en ESC &, x = 0 es un carácter sin datos) y fuera de un
+      // comando se ignoran.
+      if userFont { bytes.append(contentsOf: [UInt8](repeating: 0, count: PrinterUtils.USERFONT_FLUSH)) }
+      if raster != nil { bytes.append(contentsOf: [UInt8](repeating: 0, count: PrinterUtils.RASTER_FLUSH)) }
 
       // Initialize Printer
       bytes.append(contentsOf: [0x1B, 0x40])

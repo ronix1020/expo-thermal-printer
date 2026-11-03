@@ -506,7 +506,7 @@ try {
 | `DEVICE_NOT_FOUND` | No apareció la impresora (en iOS: no estaba en el último escaneo) o no hay impresora USB. | Escanea de nuevo o revisa el cable. |
 | `CONNECTION_FAILED` | La impresora no aceptó la conexión. | ¿Está encendida y cerca? ¿Conectada a otro teléfono? |
 | `NOT_CONNECTED` | (Android) Llamaste a `print()` sin conectar. | Llama a `connect()` / `connectUsb()` primero. |
-| `PRINT_FAILED` | Se cortó la conexión mientras se enviaba el ticket. | Reconecta y reimprime; avisa que el ticket pudo salir incompleto. |
+| `PRINT_FAILED` | Se cortó la conexión mientras se enviaba el ticket, o (iOS) la impresora pasó 5 s sin confirmar y la librería cortó la conexión. | Reconecta y reimprime; avisa que el ticket pudo salir incompleto. |
 | `SERVICE_NOT_BOUND` | (iOS) Llamaste a `print()` sin una conexión lista; equivale a `NOT_CONNECTED`. | Conecta de nuevo. |
 | `ALREADY_PRINTING` | Llamaste a `print()` mientras otro seguía enviándose (en Android/Bluetooth, hasta que termina la espera estimada). | Haz `await` del `print()` anterior antes de mandar el siguiente. |
 | `ALREADY_SCANNING` | (Android) Llamaste a `scanDevices('all')` dos veces seguidas. | Espera a que termine el primer escaneo. |
@@ -568,10 +568,12 @@ adb shell setprop log.tag.ThermalPrinter ""        # apagar
 
 Viene apagado por defecto para que los datos del ticket no queden en el log.
 
-En iOS, cada impresión deja en la consola de Xcode una línea con el tamaño, el tipo de escritura BLE y el tamaño de cada bloque:
+En iOS, cada impresión deja líneas en la consola de Xcode:
 
 ```
 [ThermalPrinter] BLE write: <bytes> B, withResponse | withoutResponse, chunks de <n> B
+[ThermalPrinter] BLE write OK: <m> chunks en <ms> ms
+[ThermalPrinter] BLE write atascado: chunk <n> de <m>, <ms> ms esperando a la impresora; se desconecta
 ```
 
 En las dos plataformas, la consola de Metro muestra un `console.warn('[ThermalPrinter] ...')` cuando un carácter no tiene equivalente en el encoding o cuando `columnWidths` se pasan del ancho.

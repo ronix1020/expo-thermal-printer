@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.8.2
+
+- iOS/BLE: los chunks miden lo que cabe en un paquete ATT (MTU − 3, ~182 B) también con
+  `withResponse`. Para ese tipo iOS reporta 512 B y manda cada chunk como long write
+  (Prepare + Execute Write), que algunos módulos BLE baratos (SAT AF330) manejan mal.
+- iOS/BLE: si la impresora pasa 5 s sin confirmar un chunk, `print()` rechaza con
+  `PRINT_FAILED` ("Printer stopped responding (chunk n of m)") y se corta la conexión. Antes
+  quedaba colgada hasta el timeout de la app. Hay que reconectar antes del siguiente ticket.
+- `userfont` y `raster` (Android e iOS): cada trabajo empieza con bytes NUL antes del `ESC @`
+  (131 en userfont, 1728 en raster). Si el trabajo anterior se cortó a mitad de la fuente
+  (`ESC &`) o de una banda de imagen (`ESC *`), los NUL la completan y el ticket nuevo no sale
+  con los glifos corridos.
+- iOS/BLE: log en Xcode al terminar (`BLE write OK: m chunks en X ms`), al atascarse
+  (`BLE write atascado: chunk n de m, X ms esperando a la impresora`) y al fallar un chunk.
+- La API JS no cambia.
+
 ## 1.8.1
 
 - iOS/BLE: todo el envío corre en la cola principal, la misma de los callbacks de CoreBluetooth.

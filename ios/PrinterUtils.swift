@@ -215,6 +215,11 @@ class PrinterUtils {
 
 extension PrinterUtils {
 
+    /// NUL que cierran una ESC & pendiente: hasta 36 bytes de un glifo 12x24 + un x = 0 por cada uno de los 95 caracteres.
+    static let USERFONT_FLUSH = 36 + 95
+    /// NUL que cierran una banda ESC * pendiente: 576 columnas x 3 bytes.
+    static let RASTER_FLUSH = 576 * 3
+
     /// GS L 0 + GS W: área de impresión completa para el ancho de papel (576 puntos en 80 mm, 384 en 58 mm).
     static func getPrintAreaCmd(_ width: Int) -> [UInt8] {
         let dots = width >= 80 ? 576 : 384

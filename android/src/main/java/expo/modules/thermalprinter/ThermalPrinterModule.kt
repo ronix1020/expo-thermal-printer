@@ -70,6 +70,10 @@ class ThermalPrinterModule : Module() {
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val USB_CHUNK = 16384   // máximo de bulkTransfer antes de API 28
         private const val USB_TIMEOUT_MS = 5000
+        // NUL que cierran una ESC & pendiente: hasta 36 bytes de un glifo 12x24 + un x = 0 por cada uno de los 95 caracteres.
+        private const val USERFONT_FLUSH = 36 + 95
+        // NUL que cierran una banda ESC * pendiente: 576 columnas x 3 bytes.
+        private const val RASTER_FLUSH = 576 * 3
     }
 
     // USB
@@ -324,6 +328,13 @@ class ThermalPrinterModule : Module() {
 
                 // raster: el texto se dibuja como imagen (ESC *); no depende de fuentes ni encodings de la impresora.
                 val raster = if (normalizeEncoding(encoding) == "raster") RasterText(width, lineSpacing) else null
+
+                // Si el trabajo anterior se cortó a medias (timeout de la app + disconnect), la impresora puede
+                // seguir dentro de un ESC & o ESC * esperando datos y se tragaría el ESC @ y lo que sigue.
+                // Los NUL completan esa definición (en ESC &, x = 0 es un carácter sin datos) y fuera de un
+                // comando se ignoran.
+                if (userFont) commands.add(ByteArray(USERFONT_FLUSH))
+                if (raster != null) commands.add(ByteArray(RASTER_FLUSH))
 
                 // Initialize Printer
                 commands.add(byteArrayOf(0x1B, 0x40))
