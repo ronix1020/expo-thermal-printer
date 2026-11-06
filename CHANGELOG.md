@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.7
+
+- Android: `compileSdkVersion`, `targetSdkVersion` y `minSdkVersion` se toman del proyecto
+  anfitrión (`rootProject.ext`, que Expo rellena) en vez de estar fijos en 34/34/23. Con Expo
+  SDK 58 el build release fallaba en `checkReleaseAarMetadata`: expo-modules-core pide
+  compileSdk >= 37. Si el proyecto no los define, se usan 36/36/23.
+
 ## 1.8.6
 
 - iOS: compila con Expo SDK 58. expo-modules-core 58 añadió `open var message` a `Exception` y
