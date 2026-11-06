@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.6
+
+- iOS: compila con Expo SDK 58. expo-modules-core 58 añadió `open var message` a `Exception` y
+  chocaba con la propiedad privada `message` de `PrinterException`; ahora se llama `detail`.
+  El mensaje que llega a JS no cambia.
+
 ## 1.8.5
 
 - iOS: `connect()` ya no rechaza con `DEVICE_NOT_FOUND` si la impresora no salió en el último

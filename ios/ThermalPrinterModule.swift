@@ -564,12 +564,13 @@ public class ThermalPrinterModule: Module {
 // Promise.reject(code, description) de Expo deja el mensaje en JS como "undefined reason":
 // el texto viaja en `reason`, así que se sobreescribe aquí.
 final class PrinterException: Exception {
-  private let message: String
+  // No se llama `message`: expo-modules-core 58 declara `open var message` en Exception.
+  private let detail: String
 
   init(_ code: String, _ message: String) {
-    self.message = message
+    self.detail = message
     super.init(name: code, description: message, code: code)
   }
 
-  override var reason: String { message }
+  override var reason: String { detail }
 }
