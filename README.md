@@ -112,6 +112,8 @@ Agrega el mensaje que verá el usuario en `app.json`:
 }
 ```
 
+iOS muestra el permiso la **primera vez que llamas a `scanDevices()`, `connect()` o `print()`**, no al abrir la app. Así eliges en qué pantalla aparece: por ejemplo, llama a `scanDevices()` al entrar a la configuración de la impresora. Esa primera llamada espera a que el usuario responda; si lo rechaza, falla con `BLUETOOTH_NOT_READY`, igual que con Bluetooth apagado. `disconnect()` nunca muestra el permiso.
+
 ---
 
 ## 🚀 Inicio rápido

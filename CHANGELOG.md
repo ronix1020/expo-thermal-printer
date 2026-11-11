@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.8
+
+- iOS: el permiso de Bluetooth ya no sale al abrir la app, sino en la primera llamada a
+  `scanDevices()`, `connect()` o `print()`. Esa primera llamada espera a que el usuario
+  responda y luego se comporta igual que antes (`BLUETOOTH_NOT_READY` si lo rechaza o si
+  Bluetooth está apagado). `disconnect()` no muestra el permiso.
+- Android no cambia.
+
 ## 1.8.7
 
 - Android: `compileSdkVersion`, `targetSdkVersion` y `minSdkVersion` se toman del proyecto

@@ -36,7 +36,23 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     centralManager = CBCentralManager(delegate: self, queue: nil)
   }
   
+  // El manager nace en el primer uso y su estado es .unknown hasta que iOS lo resuelve; si es la
+  // primera vez, eso incluye esperar a que el usuario responda el permiso.
+  private var waitingForState: [() -> Void] = []
+
+  private func whenStateKnown(_ block: @escaping () -> Void) {
+    if centralManager.state == .unknown || centralManager.state == .resetting {
+      waitingForState.append(block)
+    } else {
+      block()
+    }
+  }
+
   func scanDevices(_ promise: Promise) {
+    whenStateKnown { self.startScan(promise) }
+  }
+
+  private func startScan(_ promise: Promise) {
     if centralManager.state != .poweredOn {
       promise.reject(PrinterException("BLUETOOTH_NOT_READY", "Bluetooth is not powered on"))
       return
@@ -222,6 +238,11 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     @unknown default:
       break
     }
+    if central.state != .unknown && central.state != .resetting {
+      let blocks = waitingForState
+      waitingForState.removeAll()
+      blocks.forEach { $0() }
+    }
   }
   
   func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
@@ -234,7 +255,7 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
   }
   func connect(_ uuid: String, _ promise: Promise) {
-    attemptConnect(uuid, promise, retriesLeft: 3)
+    whenStateKnown { self.attemptConnect(uuid, promise, retriesLeft: 3) }
   }
 
   // The central manager initializes its state asynchronously; on a cold start
@@ -359,7 +380,21 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
 
 public class ThermalPrinterModule: Module {
-  private let bluetoothManager = BluetoothManager()
+  // Perezoso: crear el CBCentralManager muestra el permiso de Bluetooth, y Expo crea el módulo al
+  // abrir la app. Así el permiso sale en el primer scanDevices/connect/print. Solo en la cola principal.
+  private var manager: BluetoothManager?
+  private var bluetoothManager: BluetoothManager {
+    if let manager = manager { return manager }
+    let created = BluetoothManager()
+    created.onProgress = { [weak self] sent, total in
+      self?.sendEvent("onPrintProgress", ["sent": sent, "total": total])
+    }
+    created.onConnectionLost = { [weak self] ms in
+      self?.sendEvent("onConnectionLost", ["msSinceLastPrint": ms])
+    }
+    manager = created
+    return created
+  }
 
   public func definition() -> ModuleDefinition {
     Name("ThermalPrinter")
@@ -367,15 +402,6 @@ public class ThermalPrinterModule: Module {
     // { sent, total } en bytes mientras se envía (ACKs reales de BLE).
     // { msSinceLastPrint: number | null } cuando el enlace cae solo (no por disconnect()).
     Events("onPrintProgress", "onConnectionLost")
-
-    OnCreate {
-      self.bluetoothManager.onProgress = { [weak self] sent, total in
-        self?.sendEvent("onPrintProgress", ["sent": sent, "total": total])
-      }
-      self.bluetoothManager.onConnectionLost = { [weak self] ms in
-        self?.sendEvent("onConnectionLost", ["msSinceLastPrint": ms])
-      }
-    }
 
     // Todo lo de BluetoothManager corre en la cola principal, donde llegan los callbacks de
     // CoreBluetooth (queue: nil): pendingChunks/writePromise no se tocan desde dos hilos.
@@ -388,7 +414,9 @@ public class ThermalPrinterModule: Module {
     }.runOnQueue(.main)
     
     AsyncFunction("disconnect") { (promise: Promise) in
-      bluetoothManager.disconnect(promise)
+      // Sin manager no hay conexión; no crearlo aquí para no pedir el permiso.
+      guard let manager = manager else { promise.resolve(); return }
+      manager.disconnect(promise)
     }.runOnQueue(.main)
 
     AsyncFunction("print") { (items: [[String: Any]], width: Int, encoding: String, lineSpacing: Int, feedLines: Int, promise: Promise) in
@@ -555,8 +583,7 @@ public class ThermalPrinterModule: Module {
       
       // Los bytes se arman fuera del hilo principal (raster pesa); el envío va a la cola principal.
       let data = Data(bytes)
-      let manager = bluetoothManager
-      DispatchQueue.main.async { manager.write(data, promise) }
+      DispatchQueue.main.async { self.bluetoothManager.write(data, promise) }
     }
   }
 }

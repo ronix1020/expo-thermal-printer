@@ -1,6 +1,6 @@
 {
   "name": "@ronix1020/react-native-ultimate-thermal-printer",
-  "version": "1.8.7",
+  "version": "1.8.8",
   "description": "Native thermal printer module for Expo in Developer Client",
   "main": "index.ts",
   "types": "index.ts",
